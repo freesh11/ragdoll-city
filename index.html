@@ -992,7 +992,9 @@ function addCar(x, z, ry) {
   for (const s of [-1, 1]) { add(CAR_GEO.lamp, MT.headlamp, s * 0.6, 0.78, 2.19, false); add(CAR_GEO.lamp, MT.taillamp, s * 0.6, 0.8, -2.19, false); }
   for (const [wx, wz] of [[-0.8, 1.38], [0.8, 1.38], [-0.8, -1.38], [0.8, -1.38]]) { add(CAR_GEO.tyre, MT.tyre, wx, 0.34, wz); add(CAR_GEO.rim, MT.rim, wx * 1.01, 0.34, wz, false); }
   const along = Math.abs(Math.sin(ry)) > 0.5, hw = along ? 2.2 : 0.92, hd = along ? 0.92 : 2.2;
-  addStaticBox(x - hw, x + hw, 0, 1.45, z - hd, z + hd, null, { kind: 'car' });
+  const rec = addStaticBox(x - hw, x + hw, 0, 1.45, z - hd, z + hd, null, { kind: 'car' });
+  // the real shape, for blood to land on: body, glass and roof as tight boxes (the car only ever sits square to the street)
+  rec.blood = [CAR_GEO.body, CAR_GEO.cab, CAR_GEO.roof].map(g => { if (!g.boundingBox) g.computeBoundingBox(); const bb = g.boundingBox.clone().applyMatrix4(carM); return { x0: bb.min.x, x1: bb.max.x, y0: bb.min.y, y1: bb.max.y, z0: bb.min.z, z1: bb.max.z, kind: 'carpart' }; });
 }
 
 // ================= map: City =================
@@ -1802,7 +1804,7 @@ class Dummy {
   // standing, the boots slide a little so the stepping can place them; going down, they grip, so it doesn't skate on its heels
   gripFeet(on) { if (this.feetGrip === on) return; this.feetGrip = on; for (const p of this.parts) if (/^foot/.test(p.seg.n)) p.body.material = on ? null : footMat; }
 
-  hitBy(part, point, dir, normal, wpn) {
+  hitBy(part, point, dir, normal, wpn, track) {
     const seg = part.seg, zone = seg.zone;
     // cannon-es wants the hit point relative to the body's centre
     this.recoil = Math.max(0, (this.recoil || 0) - (simTime - (this.recoilT || 0)) * 2.5); this.recoilT = simTime;
@@ -1824,7 +1826,7 @@ class Dummy {
     this.strDip = Math.max(this.strDip, zone === 'arm' ? 0.1 : 0.25);
     let dmg = seg.dmg * wpn.dmg * (0.85 + Math.random() * 0.3);
     // trace the bullet through the organs, vessels, nerves and bones in its path
-    const path = traceAnatomy(this, point, dir.clone().normalize(), wpn.pellet ? 0.2 : wpn.dmg >= 1 ? 0.75 : 0.5);
+    const path = traceAnatomy(this, point, dir.clone().normalize(), track !== undefined ? Math.min(track + 0.02, 0.9) : wpn.pellet ? 0.2 : wpn.dmg >= 1 ? 0.75 : 0.5);
     const fx = this.woundAnatomy(path, wpn);
     if (zone === 'head') dmg = Math.min(dmg, 28 * wpn.dmg);           // the skull and scalp; what the brain does is decided above
     else if (path.length) dmg *= 0.5;
@@ -2162,7 +2164,7 @@ class Dummy {
   }
 
   // bullet hole stuck to the bone, so it rides along with the skin
-  addHole(part, point, normal) {
+  addHole(part, point, normal, exit = false) {
     const bone = part.bone;
     const m = new THREE.Mesh(holeGeo, matHole);
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
@@ -2171,11 +2173,12 @@ class Dummy {
     const b = part.body;
     _m2.compose(_pv.set(b.position.x, b.position.y, b.position.z), _qv.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w), ONE).multiply(T.O[J[part.seg.n]]);
     _m2.invert().multiply(_m1).decompose(m.position, m.quaternion, m.scale);
+    if (exit) { m.scale.multiply(_pv.set(1.5 + Math.random() * 0.8, 1.3 + Math.random() * 0.8, 1)); m.rotateZ(Math.random() * 6.3); }   // an exit wound: bigger, torn, not round
     const st = new THREE.Mesh(bloodStainGeo, matBloodStain);
     st.position.z = -0.0008; st.rotation.z = Math.random() * Math.PI * 2;
     const sz = (part.seg.zone === 'torso' || part.seg.zone === 'pelvis' ? 0.045 : 0.032) * (0.8 + Math.random() * 0.4);
     st.scale.set(sz, sz * (1 + Math.random() * 0.5), 1); m.add(st);
-    bone.add(m); this.holes.push(m);
+    bone.add(m); this.holes.push(m); bodyRun(m);
     if (this.holes.length > 24) { const h = this.holes.shift(); h.parent && h.parent.remove(h); }
   }
 
@@ -2854,6 +2857,8 @@ class Dummy {
         m.p.lerpVectors(sw.from, sw.to, e); m.p.y = groundY(m.p.x, m.p.z) + Math.sin(Math.PI * Math.pow(u, 0.8)) * sw.h;
         if (u >= 1) {
           m.p.copy(sw.to); m.sw = null; m.land = simTime; swinging--;
+          // a bloody hand leaves its print where it's put down
+          if (m.kind === 'hand') { const fa = this.parts[m.pi]; if ((fa.bloody || 0) > 0.15) { bloodPrint(m.p, _UPV, _cv1.set(fx, 0, fz), 'palm', fa.bloody); fa.bloody *= 0.8; } }
           // a weak arm can fold as the weight comes onto it
           if (m.kind === 'hand' && mode !== 'scoot' && !c.give && Math.random() < weak * 0.22) {
             c.give = { side: m.side, t: 0, dur: 0.75 + Math.random() * 0.5 };
@@ -3616,7 +3621,7 @@ class Dummy {
     if (this.alive) return;
     this.alive = true; this.hp = 100; this.pain = 0.2; this.legHurt = 0; this.fear = 0.8; this.mood = 'flee'; this.path = null;
     this.wounds = []; this.inj = this.injury(); this.stamina = 1; this.attempts = 0; this.gu = null; this.crawl = null; this.legMul = 1; this.scrambles = 0; this.shock = null; this.resetAnatomy();
-    for (const p of this.parts) { p.bloody = 0; p.smear = null; p.base = 1; p.body.allowSleep = false; p.body.angularDamping = 0.3; p.body.wakeUp(); }
+    for (const p of this.parts) { p.bloody = 0; p.smear = null; p.wsm = null; p.base = 1; p.body.allowSleep = false; p.body.angularDamping = 0.3; p.body.wakeUp(); }
     this.setState('down'); this.localMode = true; this.downNeed = 1.5; this.stunT = 0; this.settle = 0; this.str = 0;
     for (const p of this.parts) { p.body.linearDamping = 0.05; p.body.angularDamping = 0.3; }
   }
@@ -3980,6 +3985,7 @@ function addDummy(x, z, yaw, behaviour) {
     dummies[i].dispose(); dummies.splice(i, 1);
   }
   const d = new Dummy(x, z, yaw, behaviour);
+  if (!SKIN) skinSetup(d);                                   // (built once, so the first shot doesn't stutter)
   dummies.push(d);
   return d;
 }
@@ -4093,131 +4099,379 @@ function spawnBlast(p, R) {
 }
 
 // ================= blood =================
-// droplets fly on real arcs and leave stretched spatter where they land; wounds drip and spurt,
-// bodies that lie still bleed into a growing pool; exit spray paints the wall behind
+// Blood is a fluid here, not a sticker. Droplets fly on real arcs and land on whatever is in the way (pavement, a wall,
+// the side of a car) and the stain they leave depends on how they hit: round with spines straight on, a tear with a tail
+// and satellites at a glancing angle, a fine mist from an exit wound. Enough blood on a wall collects and runs down it
+// (fast while there's plenty, slowing as it lays down a trail, stopping in a fat bead); a run that reaches an edge with
+// nothing under it hangs there and drips. Wounds drip and pump; a body lying still bleeds into a pool that spreads out in
+// lobes as the volume grows; drips under a wounded body collect into a puddle. Bloody parts dragged over the ground or
+// slid down a wall leave smears that thin out as the blood is used up; bloody shoes print, bloody hands leave palm prints.
+// Everything starts wet and glossy bright red, then over minutes goes dark, matte and brown, drying darkest at the rim.
 const BQ = TOUCH ? 0.5 : 1;
-const bloodSplatTex = canvasTex(128, (x, s) => {
-  x.fillStyle = '#fff';
-  const blob = (cx, cy, r) => { x.beginPath(); for (let i = 0; i <= 18; i++) { const a = i / 18 * Math.PI * 2, rr = r * (0.75 + Math.random() * 0.35); x.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr); } x.fill(); };
-  blob(s / 2, s / 2, s * 0.2);
-  for (let i = 0; i < 14; i++) { const a = Math.random() * Math.PI * 2, d = s * (0.18 + Math.random() * 0.26); blob(s / 2 + Math.cos(a) * d, s / 2 + Math.sin(a) * d, s * (0.012 + Math.random() * 0.04)); }
-});
-const bloodPoolTex = canvasTex(128, (x, s) => {
-  x.fillStyle = '#fff'; x.beginPath();
-  for (let i = 0; i <= 28; i++) { const a = i / 28 * Math.PI * 2, r = s * (0.36 + Math.sin(a * 3 + 1) * 0.04 + Math.random() * 0.06); x.lineTo(s / 2 + Math.cos(a) * r, s / 2 + Math.sin(a) * r); }
+const BLOOD_T = { value: 0 };
+// ---- textures. Channels: alpha = coverage, red = how thick it lies there, green = the rim (where it dries darkest) ----
+function bloodBlur(a, w, h, r) {                              // box blur ×3 ≈ gaussian, on a float alpha map
+  const t = new Float32Array(a.length);
+  for (let it = 0; it < 3; it++) {
+    for (let y = 0; y < h; y++) { let s = 0; for (let x = -r; x <= r; x++) s += a[y * w + clamp(x, 0, w - 1)]; for (let x = 0; x < w; x++) { t[y * w + x] = s / (2 * r + 1); s += a[y * w + Math.min(w - 1, x + r + 1)] - a[y * w + Math.max(0, x - r)]; } }
+    for (let x = 0; x < w; x++) { let s = 0; for (let y = -r; y <= r; y++) s += t[clamp(y, 0, h - 1) * w + x]; for (let y = 0; y < h; y++) { a[y * w + x] = s / (2 * r + 1); s += t[Math.min(h - 1, y + r + 1) * w + x] - t[Math.max(0, y - r) * w + x]; } }
+  }
+}
+function bloodTexture(w, h, cells, cw, ch, blurR) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const x = cv.getContext('2d', { willReadFrequently: true }); x.fillStyle = '#fff'; x.strokeStyle = '#fff'; x.lineCap = 'round'; x.lineJoin = 'round';
+  cells.forEach((draw, i) => { const cx = (i % (w / cw)) * cw, cy = Math.floor(i / (w / cw)) * ch; x.save(); x.beginPath(); x.rect(cx, cy, cw, ch); x.clip(); x.translate(cx, cy); draw(x, cw, ch); x.restore(); });
+  const id = x.getImageData(0, 0, w, h), d = id.data, a = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) a[i] = d[i * 4 + 3] / 255;
+  const bl = a.slice(); bloodBlur(bl, w, h, blurR);
+  for (let i = 0; i < w * h; i++) { d[i * 4] = 255 * Math.min(1, bl[i] * 1.15); d[i * 4 + 1] = 255 * a[i] * clamp((0.9 - bl[i]) * 2.4, 0, 1); d[i * 4 + 2] = 0; d[i * 4 + 3] = 255 * a[i]; }
+  x.putImageData(id, 0, 0);
+  const t = new THREE.CanvasTexture(cv); t.anisotropy = MAX_ANISO; t.premultiplyAlpha = false; t.flipY = false;
+  return t;
+}
+const bBlob = (x, cx, cy, r, rough = 0.25, n = 22, sx = 1, sy = 1) => {
+  const ph = [Math.random() * 6, Math.random() * 6, Math.random() * 6];
+  x.beginPath();
+  for (let i = 0; i <= n; i++) { const a = i / n * Math.PI * 2, rr = r * (1 + rough * (0.5 * Math.sin(a * 3 + ph[0]) + 0.3 * Math.sin(a * 5 + ph[1]) + 0.2 * Math.sin(a * 9 + ph[2])) + rough * 0.3 * (Math.random() - 0.5));
+    i ? x.lineTo(cx + Math.cos(a) * rr * sx, cy + Math.sin(a) * rr * sy) : x.moveTo(cx + Math.cos(a) * rr * sx, cy + Math.sin(a) * rr * sy); }
   x.fill();
-});
-const bloodStainTex = canvasTex(64, (x, s) => {
-  const g = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
-  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.55, 'rgba(255,255,255,0.85)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-  x.fillStyle = g; x.fillRect(0, 0, s, s);
-});
-const matBloodDrop = new THREE.MeshStandardMaterial({ color: '#8f0707', emissive: '#300000', roughness: 0.2 });
-const matBloodSplat = new THREE.MeshStandardMaterial({ map: bloodSplatTex, color: '#ffffff', roughness: 0.28, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
-const matBloodPool = new THREE.MeshStandardMaterial({ map: bloodPoolTex, color: '#4f0303', roughness: 0.1, metalness: 0.05, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -6 });
-const matBloodStain = new THREE.MeshStandardMaterial({ map: bloodStainTex, color: '#5c0404', roughness: 0.35, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
-const bloodStainGeo = new THREE.PlaneGeometry(1, 1);
-const B = {
-  dropMax: Math.round(700 * BQ), splatMax: Math.round(800 * BQ), poolMax: 14,
-  drops: [], splatI: 0, splatN: 0, pools: [], poolI: 0,
 };
+const bSpine = (x, cx, cy, a, r0, len, w0) => {          // a tapering spike out of the rim, often with a droplet at its tip
+  const ex = cx + Math.cos(a) * (r0 + len), ey = cy + Math.sin(a) * (r0 + len), nx = -Math.sin(a), ny = Math.cos(a);
+  x.beginPath(); x.moveTo(cx + Math.cos(a) * r0 * 0.85 + nx * w0, cy + Math.sin(a) * r0 * 0.85 + ny * w0);
+  x.lineTo(ex, ey); x.lineTo(cx + Math.cos(a) * r0 * 0.85 - nx * w0, cy + Math.sin(a) * r0 * 0.85 - ny * w0); x.fill();
+  if (Math.random() < 0.6) bBlob(x, ex, ey, w0 * (0.6 + Math.random() * 0.8), 0.15, 10);
+};
+const BC = { roundA: 0, roundB: 1, oblique: 2, mist: 3, pool: 4, bead: 5, shoe: 6, palm: 7 };
+const bloodAtlas = bloodTexture(1024, 512, [
+  (x, s) => { const c = s / 2; bBlob(x, c, c, 46, 0.18);                                                  // straight-on impact
+    for (let i = 0; i < 18; i++) bSpine(x, c, c, i / 18 * 6.283 + Math.random() * 0.3, 42, 10 + Math.pow(Math.random(), 2) * 36, 1.5 + Math.random() * 2.5);
+    for (let i = 0; i < 22; i++) { const a = Math.random() * 6.283, d = 70 + Math.random() * 45; bBlob(x, c + Math.cos(a) * d, c + Math.sin(a) * d, 1.5 + Math.random() * 4, 0.2, 10); } },
+  (x, s) => { const c = s / 2; for (let i = 0; i < 6; i++) bBlob(x, c + (Math.random() - 0.5) * 50, c + (Math.random() - 0.5) * 50, 24 + Math.random() * 22, 0.22);   // lobed, heavier
+    for (let i = 0; i < 5; i++) bSpine(x, c, c, Math.random() * 6.283, 44, 4 + Math.random() * 12, 2 + Math.random() * 2.5);
+    for (let i = 0; i < 12; i++) { const a = Math.random() * 6.283, d = 72 + Math.random() * 40; bBlob(x, c + Math.cos(a) * d, c + Math.sin(a) * d, 1.5 + Math.random() * 3.5, 0.2, 10); } },
+  (x, s) => { const c = s / 2; bBlob(x, 92, c, 30, 0.12, 26, 1.9, 1);                                     // glancing: a tear with a tail and satellites ahead
+    x.beginPath(); x.moveTo(110, c - 22); x.quadraticCurveTo(175, c - 8, 214, c - 1); x.lineTo(214, c + 1); x.quadraticCurveTo(175, c + 8, 110, c + 22); x.fill();
+    for (let i = 0; i < 5; i++) bBlob(x, 222 + i * 7 + Math.random() * 4, c + (Math.random() - 0.5) * 10, 3.5 - i * 0.5, 0.2, 10);
+    for (let i = 0; i < 6; i++) bSpine(x, 92, c, (Math.random() - 0.5) * 1.6, 52, 6 + Math.random() * 18, 1.5 + Math.random() * 2); },
+  (x, s) => { const c = s / 2; for (let i = 0; i < 260; i++) { const r = Math.abs((Math.random() + Math.random() + Math.random() - 1.5) / 1.5) * 112, a = Math.random() * 6.283;   // exit-wound mist
+    const rr = (0.7 + Math.random() * 3.2) * (1 - r / 140); bBlob(x, c + Math.cos(a) * r, c + Math.sin(a) * r, rr, 0.1, 8, 1 + Math.random() * 0.8, 1); } },
+  (x, s) => { const c = s / 2; bBlob(x, c, c, 104, 0.09, 40); },                                          // a lobe of a pool
+  (x, s) => { const c = s / 2; x.beginPath(); x.moveTo(c - 7, 18); x.quadraticCurveTo(c - 15, 150, c - 30, 186); x.arc(c, 188, 31, Math.PI, 0, true); x.quadraticCurveTo(c + 15, 150, c + 7, 18); x.closePath(); x.fill(); },   // the bead at the foot of a run (tail up)
+  (x, s) => { const c = s / 2;                                                                             // a shoe sole, toe toward +u, with tread
+    bBlob(x, 170, c, 50, 0.06, 30, 1, 0.68); bBlob(x, 62, c, 34, 0.05, 24, 1, 0.82); x.fillRect(62, c - 22, 108, 44);
+    x.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 20; i++) x.fillRect(30 + i * 10, 0, 2, s);
+    for (let i = 0; i < 18; i++) bBlob(x, 40 + Math.random() * 180, c + (Math.random() - 0.5) * 60, 2 + Math.random() * 6, 0.4, 10);
+    x.globalCompositeOperation = 'source-over'; },
+  (x, s) => { const c = s / 2;                                                                             // a palm print, fingers toward +u
+    bBlob(x, 92, c + 4, 42, 0.12, 26, 1, 0.95);
+    for (const [dy, L] of [[-30, 74], [-10, 92], [10, 88], [29, 66]]) { x.lineWidth = 15; x.beginPath(); x.moveTo(118, c + dy * 0.7); x.lineTo(118 + L, c + dy); x.stroke(); }
+    x.lineWidth = 16; x.beginPath(); x.moveTo(84, c - 36); x.lineTo(126, c - 72); x.stroke();
+    x.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 30; i++) bBlob(x, 50 + Math.random() * 170, c + (Math.random() - 0.5) * 120, 2 + Math.random() * 7, 0.4, 10);
+    x.globalCompositeOperation = 'source-over'; },
+], 256, 256, 5);
+const bloodStreakTex = bloodTexture(256, 64, [(x, w, h) => {                 // smears and runs: streaks along u (drag marks), ragged across v
+  const img = x.getImageData(0, 0, w, h), d = img.data, ph = Math.random() * 10;
+  for (let y = 0; y < h; y++) { const v = y / (h - 1), edge = clamp(1 - Math.pow(Math.abs(v - 0.5) * 2, 3 + Math.sin(v * 13) * 1.5), 0, 1);
+    for (let xx = 0; xx < w; xx++) {
+      // wipe striations run along the drag and drift a little; the film thins and thickens slowly along its length
+      const u = xx / w * 6.283, str = Math.pow(Math.abs(Math.sin(v * 47 + Math.sin(v * 19 + ph) * 2.5 + 0.35 * Math.sin(u + v * 7))), 0.7);
+      const gaps = 0.7 + 0.3 * Math.sin(u + ph + v * 3) * (0.6 + 0.4 * Math.sin(u * 2 + v * 5));
+      const rim = 1 + 0.6 * Math.pow(Math.abs(v - 0.5) * 2, 6);                       // blood piles up along the edges of a wipe
+      const a = clamp(edge * (0.32 + 0.68 * str * gaps) * rim, 0, 1); d[(y * w + xx) * 4 + 3] = 255 * a; } }
+  x.putImageData(img, 0, 0); }], 256, 64, 3);
+bloodStreakTex.wrapS = THREE.RepeatWrapping;
+// one material recipe for all of it: wet and bright to begin with, dark, matte and brown once dry, darkest at the rim
+function bloodMaterial(map, { dry = 90, r0 = 0.12, r1 = 0.72, offset = -4, atlas = false, thin = 1 } = {}) {
+  const m = new THREE.MeshStandardMaterial({ map, roughness: r0, metalness: 0, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
+  m.onBeforeCompile = sh => {
+    sh.uniforms.uBT = BLOOD_T;
+    // atlas decals pick their picture with bInfo.zw; streaks tile along their length (bInfo.z) and are capsules bInfo.w widths long
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute vec4 bInfo;\nvarying vec2 vBI;\nvarying vec3 vCap;')
+      .replace('#include <uv_vertex>', '#include <uv_vertex>\nvBI = bInfo.xy;' + (atlas ? '\nvMapUv = vMapUv * vec2(0.25, 0.5) + bInfo.zw; vCap = vec3(0.0);' : '\nvCap = vec3(uv, bInfo.w); vMapUv.x = vMapUv.x * bInfo.z + fract(bInfo.x * 0.371);'));
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uBT;\nvarying vec2 vBI;\nvarying vec3 vCap;')
+      .replace('#include <map_fragment>', `
+        vec4 bt = texture2D(map, vMapUv); bt.r *= ${thin.toFixed(2)};
+        float dryK = clamp((uBT - vBI.x) / ${dry.toFixed(1)}, 0.0, 1.0); dryK = dryK * dryK * (3.0 - 2.0 * dryK);
+        float hv = fract(sin(vBI.x * 91.7) * 4375.5);
+        vec3 fresh = vec3(0.33 + 0.06 * hv, 0.006, 0.005) * (1.0 - 0.45 * bt.r);          // thick blood absorbs more light: darker
+        vec3 dried = vec3(0.075 + 0.02 * hv, 0.01, 0.006) * (1.0 - 0.35 * bt.r);
+        diffuseColor.rgb = mix(fresh, dried, dryK) * (1.0 - 0.55 * bt.g * dryK);        // dries darkest at its rim
+        diffuseColor.a *= bt.a * vBI.y * mix(1.0, 0.82 + 0.18 * bt.r, dryK);
+        if (vCap.z > 0.0) { float px = vCap.x * vCap.z, py = vCap.y - 0.5;           // rounded, ragged ends
+          float dd = length(vec2(px - clamp(px, 0.5, max(0.5, vCap.z - 0.5)), py)) - 0.5 + (0.5 - bt.r) * 0.12;
+          diffuseColor.a *= smoothstep(0.02, -0.06, dd); }`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = mix(${r0.toFixed(3)}, ${r1.toFixed(3)}, dryK) + (1.0 - bt.r) * 0.15;`);
+  };
+  m.customProgramCacheKey = () => 'blood' + dry + r0 + r1 + atlas + thin;
+  return m;
+}
+// a layer of decals (flat quads lying on a surface), one instanced draw for the lot
+class BloodLayer {
+  constructor(map, max, opts, order) {
+    this.max = max; this.i = 0; this.n = 0;
+    const g = new THREE.PlaneGeometry(1, 1);
+    this.info = new THREE.InstancedBufferAttribute(new Float32Array(max * 4), 4); this.info.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('bInfo', this.info);
+    this.mesh = new THREE.InstancedMesh(g, bloodMaterial(map, opts), max);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = order; this.mesh.receiveShadow = true; scene.add(this.mesh);
+  }
+  add(mat, alpha, z, w, born = BLOOD_T.value) {
+    let i;
+    if (this.free) { i = this.free.length ? this.free.pop() : this.n < this.max ? this.n : 0; this.n = Math.max(this.n, i + 1); }   // (pools: slots are handed back, never overwritten while in use)
+    else { i = this.i; this.i = (this.i + 1) % this.max; this.n = Math.min(this.max, this.n + 1); }
+    this.set(i, mat); this.info.setXYZW(i, born, alpha, z, w); this.info.needsUpdate = true; this.mesh.count = this.n;
+    return i;
+  }
+  set(i, mat) { this.mesh.setMatrixAt(i, mat); this.mesh.instanceMatrix.needsUpdate = true; }
+  setInfo(i, born, alpha, z, w) { this.info.setX(i, born); this.info.setY(i, alpha); if (z !== undefined) { this.info.setZ(i, z); this.info.setW(i, w); } this.info.needsUpdate = true; }
+  release(i) { this.set(i, _dM.makeScale(0, 0, 0)); if (this.free) this.free.push(i); }
+  clear() { this.i = 0; this.n = 0; this.mesh.count = 0; if (this.free) this.free.length = 0; }
+}
+const cellUV = c => [(c % 4) * 0.25, Math.floor(c / 4) * 0.5];        // (the canvas goes up unflipped: its top row of pictures is v 0–0.5)
+const B = {
+  dropMax: Math.round(900 * BQ), drops: [], runs: [], pools: [], acc: new Map(), bodyRuns: [],
+  splats: new BloodLayer(bloodAtlas, Math.round(1400 * BQ), { dry: 110, r0: 0.1, r1: 0.7, offset: -4, atlas: true }, 2),
+  smears: new BloodLayer(bloodStreakTex, Math.round(1100 * BQ), { dry: 70, r0: 0.18, r1: 0.78, offset: -3, thin: 0.65 }, 1),
+  pool: new BloodLayer(bloodAtlas, 180, { dry: 320, r0: 0.03, r1: 0.55, offset: -2, atlas: true, thin: 0.4 }, 0),
+};
+B.pool.free = [];
+// droplets in the air: stretched along their flight, wet and glossy
+const matBloodDrop = new THREE.MeshStandardMaterial({ color: '#7a0303', emissive: '#1c0000', roughness: 0.12 });
 B.dropMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 6, 4), matBloodDrop, B.dropMax);
-B.dropMesh.count = 0; B.dropMesh.frustumCulled = false; scene.add(B.dropMesh);
-B.splatMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), matBloodSplat, B.splatMax);
-B.splatMesh.count = 0; B.splatMesh.frustumCulled = false; B.splatMesh.renderOrder = 1; scene.add(B.splatMesh);
-B.splatMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(B.splatMax * 3), 3);
-const _bv = new THREE.Vector3(), _bo = new THREE.Object3D(), _bq = new THREE.Quaternion(), _bc = new THREE.Color(), _UPV = new THREE.Vector3(0, 1, 0), _ZV = new THREE.Vector3(0, 0, 1);
+B.dropMesh.count = 0; B.dropMesh.frustumCulled = false; B.dropMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(B.dropMesh);
+// the stain round a bullet hole in the body, and the trickle running from it
+const matBloodStain = new THREE.MeshStandardMaterial({ map: canvasTex(64, (x, s) => { const g = x.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2); g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.55, 'rgba(255,255,255,0.85)'); g.addColorStop(1, 'rgba(255,255,255,0)'); x.fillStyle = g; x.fillRect(0, 0, s, s); }),
+  color: '#4a0303', roughness: 0.3, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+const bloodStainGeo = new THREE.PlaneGeometry(1, 1);
+const matBodyRun = new THREE.MeshStandardMaterial({ map: canvasTex(64, (x, s) => {
+  x.fillStyle = '#fff'; x.beginPath(); x.moveTo(s / 2 - 7, 0); x.quadraticCurveTo(s / 2 - 5, s * 0.7, s / 2 - 9, s * 0.86); x.arc(s / 2, s * 0.86, 9, Math.PI, 0, true); x.quadraticCurveTo(s / 2 + 5, s * 0.7, s / 2 + 7, 0); x.fill(); }),
+  color: '#520303', roughness: 0.22, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+const bodyRunGeo = new THREE.PlaneGeometry(1, 1).translate(0, -0.5, 0);
+
+const _bv = new THREE.Vector3(), _bo = new THREE.Object3D(), _bq = new THREE.Quaternion(), _dM = new THREE.Matrix4(), _UPV = new THREE.Vector3(0, 1, 0), _ZV = new THREE.Vector3(0, 0, 1);
+const _dX = new THREE.Vector3(), _dY = new THREE.Vector3(), _dZ = new THREE.Vector3(), _dP = new THREE.Vector3(), _dQ = new THREE.Vector3();
+// a decal's placement: lying on the surface with normal n, its +x (u) along `along`, sx by sy metres
+function decalMatrix(p, n, along, sx, sy, lift = 0.0025) {
+  _dZ.copy(n);
+  if (along) _dX.copy(along).addScaledVector(n, -along.dot(n));
+  if (!along || _dX.lengthSq() < 1e-8) {                  // no direction to it: any way round
+    _dY.crossVectors(n, Math.abs(n.y) > 0.9 ? _ZV : _UPV).normalize(); const a = Math.random() * 6.283;
+    _dX.copy(_dY).multiplyScalar(Math.cos(a)).addScaledVector(_dP.crossVectors(n, _dY), Math.sin(a));
+  }
+  _dX.normalize(); _dY.crossVectors(_dZ, _dX);
+  _dP.copy(p).addScaledVector(n, lift);
+  return _dM.set(_dX.x * sx, _dY.x * sy, _dZ.x, _dP.x, _dX.y * sx, _dY.y * sy, _dZ.y, _dP.y, _dX.z * sx, _dY.z * sy, _dZ.z, _dP.z, 0, 0, 0, 1);
+}
 function spawnDrop(p, v, size) {
   if (B.drops.length >= B.dropMax) B.drops.shift();
   B.drops.push({ p: p.clone(), v: v.clone(), s: size, t: 0 });
 }
-// a flat splat lying on a surface; stretched along the way the drop was travelling
-function addSplat(p, n, size, along, stretch = 1, shade = 0) {
-  _bq.setFromUnitVectors(_ZV, n);
-  let ang = Math.random() * Math.PI * 2;
-  if (along && stretch > 1.05) {
-    const xa = new THREE.Vector3(1, 0, 0).applyQuaternion(_bq), d = along.clone().addScaledVector(n, -along.dot(n));
-    if (d.lengthSq() > 1e-6) { d.normalize(); ang = Math.atan2(xa.clone().cross(d).dot(n), xa.dot(d)); }
-  }
-  _bo.quaternion.setFromAxisAngle(n, ang).multiply(_bq);
-  _bo.position.copy(p).addScaledVector(n, 0.004);
-  _bo.scale.set(size * stretch, size, 1);
-  _bo.updateMatrix();
-  const i = B.splatI; B.splatI = (B.splatI + 1) % B.splatMax; B.splatN = Math.min(B.splatMax, B.splatN + 1);
-  B.splatMesh.setMatrixAt(i, _bo.matrix);
-  _bc.setRGB(0.3 - shade * 0.08 + Math.random() * 0.05, 0.006, 0.006); B.splatMesh.setColorAt(i, _bc);
-  B.splatMesh.count = B.splatN; B.splatMesh.instanceMatrix.needsUpdate = true; B.splatMesh.instanceColor.needsUpdate = true;
+// a stain where a drop (or a spray) hit: its shape from how it hit; returns the instance
+function addSplat(p, n, size, along, stretch = 1, shade = 0, cell) {
+  if (cell === undefined) cell = stretch > 1.7 ? BC.oblique : Math.random() < 0.5 ? BC.roundA : BC.roundB;
+  const s = cell === BC.oblique ? size * Math.min(2.4, stretch) : size, [cu, cv] = cellUV(cell);
+  return B.splats.add(decalMatrix(p, n, along, s * (cell === BC.oblique ? 1.15 : stretch > 1 ? Math.min(1.5, stretch) : 1), cell === BC.oblique ? size * 1.05 : size), 0.94 - shade * 0.1, cu, cv);
 }
+// a streak from a to b lying on a surface (normal n)
+function addSmear(a, b, n, width, alpha, cap = false) {
+  _bv.subVectors(b, a); const len = _bv.length(); if (len < 1e-3) return -1;
+  const mid = _bo.position.addVectors(a, b).multiplyScalar(0.5);
+  // (the first piece of a trail is rounded at its ends; the pieces after it butt on flat so the joins don't bead)
+  const L = cap ? len + width : len + width * 0.1;
+  return B.smears.add(decalMatrix(mid, n, _bv, L, width, 0.002), alpha, Math.max(0.3, len / 0.6), cap ? L / width : 0);
+}
+// ---- the world, as seen by a drop: axis-aligned boxes (and the ground plane) ----
+const _dH = { t: 0, n: new THREE.Vector3(), b: null };
+function bloodSegHit(p0, p1) {
+  let best = 2, bn = null, bb = null;
+  const dx = p1.x - p0.x, dy = p1.y - p0.y, dz = p1.z - p0.z;
+  if (p1.y <= 0 && p0.y > 0) { best = p0.y / (p0.y - p1.y); bn = 'gy'; }
+  // slab test, no allocations (it runs for every drop every frame)
+  let t0, t1, ax;
+  const slab = (o, d, lo, hi, k) => {
+    if (Math.abs(d) < 1e-9) { if (o < lo || o > hi) t0 = 2; return; }
+    let a = (lo - o) / d, c = (hi - o) / d, s = -1; if (a > c) { const tmp = a; a = c; c = tmp; s = 1; }
+    if (a > t0) { t0 = a; ax = k * s; } if (c < t1) t1 = c; if (t0 > t1) t0 = 2;
+  };
+  const one = b => {
+    t0 = 0; t1 = 1; ax = 0;
+    slab(p0.x, dx, b.x0, b.x1, 1); if (t0 <= 1) slab(p0.y, dy, b.y0, b.y1, 2); if (t0 <= 1) slab(p0.z, dz, b.z0, b.z1, 3);
+    return t0 <= 1 && ax !== 0;
+  };
+  const test = l => { for (let i = 0; i < l.length; i++) { const b = l[i];
+    if (b.kind === 'pole' || b.kind === 'tree') continue;                  // thin, round things: the box is far fatter than what's there
+    if (b.blood) { for (const s of b.blood) if (one(s) && t0 < best) { best = t0; bn = ax; bb = s; } continue; }
+    if (one(b) && t0 < best && (b.kind !== 'bench' || ax === 2)) { best = t0; bn = ax; bb = b; }   // (a bench: only its seat)
+  } };
+  test(cellOf(p1.x, p1.z)); const c0 = cellOf(p0.x, p0.z); if (c0 !== cellOf(p1.x, p1.z)) test(c0);
+  if (best > 1) return null;
+  _dH.t = best; _dH.b = bb; _dH.lift = skinLift(bb, p0.y + dy * best);
+  if (bn === 'gy') _dH.n.set(0, 1, 0); else { const k = Math.abs(bn); _dH.n.set(k === 1 ? 1 : 0, k === 2 ? 1 : 0, k === 3 ? 1 : 0).multiplyScalar(Math.sign(bn)); }
+  return _dH;
+}
+// how far the visible surface stands proud of the collision box (a shopfront is built 2 cm proud of its building)
+function skinLift(b, y) { return b && b.kind === 'building' && y < 3.9 ? 0.021 : 0; }
+// blood collecting in one spot (a dripping wound over the pavement, spray soaking a patch of wall)
+function bloodCollect(p, n, vol, b) {
+  const g = n.y > 0.6 ? 0.1 : 0.07, k = `${Math.round(p.x / g)},${Math.round(p.y / g)},${Math.round(p.z / g)},${n.x},${n.y},${n.z}`;
+  let a = B.acc.get(k); if (!a) { a = { vol: 0, t: simTime }; B.acc.set(k, a); if (B.acc.size > 600) B.acc.delete(B.acc.keys().next().value); }
+  a.vol += vol; a.t = simTime;
+  if (n.y > 0.6) {                                                             // (units: a 1 cm drop ≈ 4 ml)
+    const P = inPool(p.x, p.z, p.y);
+    if (P) { poolFeed(p.x, p.z, p.y, a.vol * 1.6, null); a.vol = 0; }
+    else if (a.vol * 1.6 > 8) { poolFeed(p.x, p.z, p.y, a.vol * 1.6, null); a.vol = 0; }
+  }
+  else if (n.y > -0.6) { if (a.vol > 0.35 && !a.run) { a.run = startRun(p, n, b, a.vol); a.vol = 0; } else if (a.run && !a.run.done) { a.run.vol += vol; a.vol = 0; } }
+  else if (a.vol > 0.2) { startRun(p, n, b, a.vol, true); a.vol = 0; }
+}
+// what a drop does when it lands
+function dropLands(dr, q, n, b) {
+  const vol = Math.pow(dr.s / 0.01, 3), sp = dr.v.length(), vn = Math.abs(dr.v.dot(n)), vt = Math.sqrt(Math.max(0, sp * sp - vn * vn));
+  const stretch = 1 + Math.min(3, vt / Math.max(0.6, vn) * 0.8);
+  // a slow drip lands as a smooth round drop; harder, it splashes into lobes; really fast, it throws spines and satellites
+  const cell = stretch > 1.7 ? BC.oblique : vn < 2.2 ? BC.pool : vn < 7.5 ? BC.roundB : BC.roundA;
+  addSplat(q, n, dr.s * (cell === BC.pool ? 6.5 : 6 + Math.min(5, sp * 0.8)) * (0.85 + Math.random() * 0.3), dr.v, stretch, 0, cell);
+  const qq = q.clone();
+  if (sp > 3 && Math.random() < 0.5) addSplat(_bv.copy(qq).addScaledVector(dr.v, 0.025), n, dr.s * 1.4, dr.v, 2.2);   // a satellite thrown ahead
+  bloodCollect(qq, n, vol, b);
+}
+// ---- runs: blood moving down a wall ----
+function startRun(p, n, b, vol, hanging = false) {
+  if (B.runs.length > 70) { const o = B.runs.shift(); o.done = true; }
+  const along = _UPV.clone().addScaledVector(n, -n.y); if (along.lengthSq() < 0.01) along.set(1, 0, 0); along.normalize();
+  const R = { p: p.clone(), from: p.clone(), n: n.clone(), b, vol: Math.min(4, vol), t: 0, delay: hanging ? 0 : 0.25 + Math.random() * 0.6,
+    seg: -1, bead: -1, w: 0.0045 + Math.min(0.007, vol * 0.004), wob: (Math.random() - 0.5) * 2, side: new THREE.Vector3().crossVectors(n, along).normalize(),
+    hang: hanging, dripT: 0.2 + Math.random() * 0.5, done: false, down: along.negate() };
+  R.bead = addSplat(p, n, R.w * 2.6, R.down.clone().negate(), 1, 0, BC.bead);
+  B.runs.push(R); return R;
+}
+function updateRuns(dt) {
+  for (let i = B.runs.length - 1; i >= 0; i--) {
+    const R = B.runs[i];
+    if (R.done) { B.runs.splice(i, 1); continue; }
+    R.t += dt; if (R.t < R.delay) continue;
+    if (R.hang) {
+      // at an edge, or under an overhang: the bead swells and lets go, again and again until it's used up
+      R.dripT -= dt;
+      if (R.dripT <= 0) { const s = 0.0035 + Math.min(0.003, R.vol * 0.002); spawnDrop(_bv.copy(R.p).addScaledVector(R.n, 0.004).add(_dP.set(0, -0.006, 0)), _dP.set(0, -0.05, 0), s); R.vol -= Math.pow(s / 0.01, 3) * 1.6; R.dripT = 0.5 + Math.random() * 1.2 + (1 - Math.min(1, R.vol)) * 1.5; }
+      if (R.vol < 0.03) R.done = true;
+      continue;
+    }
+    // flowing: quick while there's plenty, laying down a trail that uses it up, then it stalls in a bead
+    const speed = clamp(0.02 + 0.16 * (R.vol - 0.06), 0, 0.2);
+    if (speed <= 0.004 || R.vol < 0.06) { R.done = true; continue; }
+    const ds = speed * dt; R.vol -= ds * 2.6;
+    R.wob += (Math.random() - 0.5) * dt * 6; R.wob = clamp(R.wob, -1, 1);
+    R.p.addScaledVector(R.down, ds).addScaledVector(R.side, R.wob * ds * 0.18);
+    // the end of the surface?
+    const b = R.b;
+    if (b && R.p.y <= b.y0 + 0.002) {
+      R.p.y = b.y0 + 0.002;
+      const out = _bv.copy(R.p).addScaledVector(R.n, 0.03), gy = groundY(out.x, out.z);
+      if (b.y0 - gy < 0.03) { poolFeed(out.x, out.z, gy, R.vol * 1.6, null); R.done = true; }   // runs into the corner with the ground and collects there
+      else R.hang = true;                                                                     // an edge with nothing under it: it drips
+    }
+    // the trail behind it, in short pieces so it can wander
+    const L = R.p.distanceTo(R.from), w = R.w * clamp(0.55 + R.vol * 0.5, 0.55, 1.1);
+    if (R.seg < 0 || L > 0.07) { const first = R.seg < 0; if (!first) R.from.copy(R.p); R.seg = addSmear(R.from, _dP.copy(R.p).addScaledVector(R.down, 0.0005), R.n, w, 0.95, first); R.segCap = first; }
+    else { _bv.subVectors(R.p, R.from); const LL = R.segCap ? L + w : L + w * 0.1; B.smears.set(R.seg, decalMatrix(_dP.addVectors(R.from, R.p).multiplyScalar(0.5), R.n, _bv, LL, w, 0.002)); B.smears.setInfo(R.seg, BLOOD_T.value, 0.95, Math.max(0.3, L / 0.6), R.segCap ? LL / w : 0); }
+    B.splats.set(R.bead, decalMatrix(_dP.copy(R.p).addScaledVector(R.down, -R.w * 0.9), R.n, R.down.clone().negate(), R.w * 2.6, R.w * 2.6 * 1.05));
+    B.splats.setInfo(R.bead, BLOOD_T.value, 0.97);
+  }
+}
+// ---- pools: they spread as the volume grows, round at first, then in lobes ----
+function poolFeed(x, z, gy, ml, owner) {
+  let P = owner && owner.pool && Math.hypot(owner.pool.x - x, owner.pool.z - z) < owner.pool.R + 0.3 ? owner.pool : null;
+  if (!P) for (const Q of B.pools) if (Math.abs(Q.gy - gy) < 0.05 && Math.hypot(Q.x - x, Q.z - z) < Q.R + (owner ? 0.04 : 0.1)) { P = Q; break; }   // (a drip next to a puddle runs into it)
+  if (!P) {
+    if (B.pools.length >= 22) {                                   // full: the smallest puddle goes (never the big pool by a body)
+      let k = 0; for (let j = 1; j < B.pools.length; j++) if (B.pools[j].ml < B.pools[k].ml) k = j;
+      const old = B.pools.splice(k, 1)[0]; if (old.owner && old.owner.pool === old) old.owner.pool = null;
+      for (const l of old.lobes) B.pool.release(l.i);
+    }
+    const dir = Math.random() * 6.283, lobes = [{ ox: 0, oz: 0, k: 1, at: 0 }];
+    for (let j = 0; j < 4 + (Math.random() * 3 | 0); j++) { const a = dir + (Math.random() - 0.5) * 2.6, d = 0.45 + Math.random() * 0.4; lobes.push({ ox: Math.cos(a) * d, oz: Math.sin(a) * d, k: 0.4 + Math.random() * 0.4, at: 6 + j * 14 + Math.random() * 12 }); }
+    P = { x, z, gy, ml: 0, R: 0, owner, lobes };
+    for (const l of P.lobes) { const [cu, cv] = cellUV(BC.pool); l.i = B.pool.add(_dM.makeScale(0, 0, 0), 0.96, cu, cv); l.rot = Math.random() * 6.283; }
+    B.pools.push(P);
+  }
+  if (owner) owner.pool = P;
+  P.ml += ml; P.R = Math.sqrt(P.ml * 0.00033 / Math.PI);                  // a litre spreads to about a third of a square metre
+  for (const l of P.lobes) {
+    const g = smooth((P.ml - l.at) / (l.at * 0.8 + 10)); if (g <= 0) continue;
+    const r = P.R * l.k * g;
+    B.pool.set(l.i, decalMatrix(_dP.set(P.x + l.ox * P.R, P.gy, P.z + l.oz * P.R), _UPV, _bv.set(Math.cos(l.rot), 0, Math.sin(l.rot)), r * 2.1, r * 2.1, 0.003));
+    B.pool.setInfo(l.i, BLOOD_T.value, 0.96);
+  }
+  return P;
+}
+function inPool(x, z, gy) { for (const P of B.pools) if (Math.abs(P.gy - gy) < 0.05 && Math.hypot(P.x - x, P.z - z) < P.R * 0.95) return P; return null; }
+// a wall right behind the exit wound gets the heavy spray: a mist pattern and a soaked centre (the drops do the rest)
 const bloodRay = new CANNON.RaycastResult();
 function wallSpatter(from, dir, k) {
-  const to = from.clone().addScaledVector(dir, 3.5);
-  bloodRay.reset();
-  world.raycastClosest(toC(from), toC(to), { skipBackfaces: true, collisionFilterMask: GRP.STATIC }, bloodRay);
-  if (!bloodRay.hasHit) return;
-  const p = fromC(bloodRay.hitPointWorld), n = fromC(bloodRay.hitNormalWorld).normalize(), dist = from.distanceTo(p);
+  const h = bloodSegHit(from, _bv.copy(from).addScaledVector(dir, 3.5));
+  if (!h) return;
+  const p = from.clone().addScaledVector(dir, 3.5 * h.t).addScaledVector(h.n, h.lift), n = h.n.clone(), dist = from.distanceTo(p), b = h.b;
   B.lastWall = p; B.lastWallN = n;
   const f = (1 - dist / 3.5) * k, slant = Math.min(2.2, 1 / Math.max(0.35, Math.abs(dir.dot(n))));
-  addSplat(p, n, 0.16 + 0.35 * f, dir, slant);
-  const t1 = new THREE.Vector3().crossVectors(n, Math.abs(n.y) > 0.9 ? _ZV : _UPV).normalize(), t2 = new THREE.Vector3().crossVectors(n, t1);
-  for (let i = 0; i < Math.round(14 * f * BQ + 4); i++) {
-    const r = Math.pow(Math.random(), 1.6) * 0.45 * (0.5 + f), a = Math.random() * Math.PI * 2;
-    const q = p.clone().addScaledVector(t1, Math.cos(a) * r).addScaledVector(t2, Math.sin(a) * r);
-    addSplat(q, n, 0.015 + Math.random() * 0.07 * f, dir, slant * (1 + r));
-  }
-  // runs down a wall
-  if (Math.abs(n.y) < 0.4 && f > 0.25) for (let i = 0; i < 2 + Math.round(f * 3); i++) {
-    const q = p.clone().addScaledVector(t1, (Math.random() - 0.5) * 0.15); q.y -= 0.08 + Math.random() * 0.1;
-    addSplat(q, n, 0.025, new THREE.Vector3(0, -1, 0), 4 + Math.random() * 4);
-  }
+  addSplat(p, n, 0.5 + 0.7 * f, dir, slant, 0, BC.mist);
+  addSplat(p, n, 0.07 + 0.12 * f, dir, slant);
+  if (Math.abs(n.y) < 0.6 && f > 0.3) bloodCollect(p, n, 0.4 + f, b);
 }
 // a bullet goes in: a puff of red mist, a little back-spatter toward you, and (if it goes through) a spray out the far side
-function bloodHit(part, pt, dir, nrm, W) {
+function bloodHit(part, pt, dir, nrm, W, exitPt, exitN) {
   const head = part.seg.zone === 'head', k = W.pellet ? 0.45 : W.dmg >= 1 ? 1 : 0.8;
   spawnPuff(pt.x, pt.y, pt.z, '#8c0a0a', (head ? 0.75 : 0.45) * k + 0.1, 0.3, 0.02);
   const nb = Math.round((head ? 14 : 8) * k * BQ) + 2;
   for (let i = 0; i < nb; i++) {
     const v = nrm.clone().multiplyScalar(0.6 + Math.random() * 1.4).add(new THREE.Vector3((Math.random() - 0.5) * 1.2, Math.random() * 1.0, (Math.random() - 0.5) * 1.2));
-    spawnDrop(pt, v, 0.004 + Math.random() * 0.005);
+    spawnDrop(pt, v, 0.003 + Math.random() * 0.005);
   }
-  if (W.pellet && Math.random() > 0.3) return;
-  const c = fromC(part.body.position), t = c.sub(pt).dot(dir);
-  const ex = pt.clone().addScaledVector(dir, Math.max(0.05, 2 * t));
+  if (exitPt === null) return;                                                // it stayed in the body: nothing comes out the far side
+  if (exitPt === undefined && W.pellet && Math.random() > 0.3) return;
+  let ex;
+  if (exitPt) ex = exitPt.clone().addScaledVector(dir, 0.01);
+  else { const c = fromC(part.body.position), t = c.sub(pt).dot(dir); ex = pt.clone().addScaledVector(dir, Math.max(0.05, 2 * t)); }
   spawnPuff(ex.x, ex.y, ex.z, '#7d0909', (head ? 1.1 : 0.7) * k, 0.45, 0.02);
-  const ne = Math.round((head ? 44 : 24) * k * BQ) + 3;
+  const ne = Math.round((head ? 50 : 28) * k * BQ) + 3;
   for (let i = 0; i < ne; i++) {
-    const v = dir.clone().multiplyScalar(2 + Math.random() * 4.5).add(new THREE.Vector3((Math.random() - 0.5) * 1.6, (Math.random() - 0.3) * 1.4, (Math.random() - 0.5) * 1.6));
-    spawnDrop(ex, v, 0.004 + Math.random() * 0.011);
+    const v = dir.clone().multiplyScalar(2 + Math.random() * 5).add(new THREE.Vector3((Math.random() - 0.5) * 1.6, (Math.random() - 0.3) * 1.4, (Math.random() - 0.5) * 1.6));
+    spawnDrop(ex, v, 0.0025 + Math.pow(Math.random(), 1.6) * 0.008);
   }
   // heavier gouts that fall close to the body
-  for (let i = 0; i < Math.round(4 * k * BQ) + 1; i++) spawnDrop(ex, dir.clone().multiplyScalar(0.6 + Math.random()).add(new THREE.Vector3((Math.random() - 0.5) * 0.6, Math.random() * 0.4, (Math.random() - 0.5) * 0.6)), 0.012 + Math.random() * 0.01);
+  for (let i = 0; i < Math.round(8 * k * BQ) + 2; i++) spawnDrop(ex, dir.clone().multiplyScalar(0.8 + Math.random() * 1.6).add(new THREE.Vector3((Math.random() - 0.5) * 0.6, Math.random() * 0.4, (Math.random() - 0.5) * 0.6)), 0.008 + Math.random() * 0.006);
   wallSpatter(ex, dir, head ? 1 : 0.75 * k);
 }
 function bloodBurst(d, from) {   // blast: sprays from the body away from the explosion
   for (let i = 0; i < 3; i++) {
     const part = d.parts[(Math.random() * d.parts.length) | 0], p = fromC(part.body.position);
     const dir = p.clone().sub(from); dir.y = Math.max(dir.y, 0.2); dir.normalize();
-    for (let j = 0; j < Math.round(10 * BQ); j++) spawnDrop(p, dir.clone().multiplyScalar(1.5 + Math.random() * 3).add(new THREE.Vector3((Math.random() - 0.5) * 2, Math.random() * 1.5, (Math.random() - 0.5) * 2)), 0.005 + Math.random() * 0.008);
+    for (let j = 0; j < Math.round(12 * BQ); j++) spawnDrop(p, dir.clone().multiplyScalar(1.5 + Math.random() * 3).add(new THREE.Vector3((Math.random() - 0.5) * 2, Math.random() * 1.5, (Math.random() - 0.5) * 2)), 0.003 + Math.random() * 0.009);
     spawnPuff(p.x, p.y, p.z, '#7d0909', 0.6, 0.4, 0.02);
   }
 }
-function poolAt(d, x, z, gy) {
-  let P = d.pool;
-  if (P && Math.hypot(P.x - x, P.z - z) < 0.35 + P.r * 0.5) return P;
-  // a new pool (the old one stays on the ground)
-  let slot = B.pools[B.poolI];
-  if (!slot) { slot = { mesh: new THREE.Mesh(bloodStainGeo, matBloodPool) }; slot.mesh.rotation.x = -Math.PI / 2; slot.mesh.renderOrder = 2; scene.add(slot.mesh); B.pools[B.poolI] = slot; }
-  if (slot.owner && slot.owner.pool === slot) slot.owner.pool = null;
-  B.poolI = (B.poolI + 1) % B.poolMax;
-  Object.assign(slot, { owner: d, x, z, r: 0.04, max: 0.35 + Math.random() * 0.25 });
-  slot.mesh.visible = true; slot.mesh.rotation.z = Math.random() * Math.PI * 2;
-  slot.mesh.position.set(x, gy + 0.006 + B.poolI * 0.0004, z); slot.mesh.scale.setScalar(0.08);
-  d.pool = slot; return slot;
+// a trickle of blood down the skin from a fresh wound (pinned to the hole, so it moves with the body)
+function bodyRun(hole) {
+  hole.updateWorldMatrix(true, false); hole.getWorldQuaternion(_bq);
+  const dl = _bv.set(0, -1, 0).applyQuaternion(_bq.invert()); dl.z = 0;
+  if (dl.lengthSq() < 0.15) return;                                    // facing straight up or down: it pools in the hole instead
+  const r = new THREE.Mesh(bodyRunGeo, matBodyRun); r.rotation.z = Math.atan2(dl.x, -dl.y); r.position.z = -0.0004; r.scale.set(0.011 + Math.random() * 0.006, 0.001, 1);
+  hole.add(r); B.bodyRuns.push({ m: r, t: 0, len: 0.05 + Math.random() * 0.12, dur: 1.5 + Math.random() * 3 });
+  if (B.bodyRuns.length > 120) B.bodyRuns.shift();
 }
 function updateBlood(dt) {
+  BLOOD_T.value = simTime;
   // wounds: drip, and spurt with the heartbeat while fresh
   for (const d of dummies) {
     if (!d.wounds.length) continue;
     let total = 0, worst = null, spawned = 0;
+    const pel = d.parts[J.pelvis].body;
+    const still = (!d.alive || d.localMode || (d.state === 'crawl' && d.moveSpeed < 0.02)) && Math.hypot(pel.velocity.x, pel.velocity.y, pel.velocity.z) < 0.35;
     for (const w of d.wounds) {
       if (!d.alive) w.bleed *= Math.exp(-dt / 30);
       if (w.bleed < 0.015) continue;
@@ -4226,42 +4480,33 @@ function updateBlood(dt) {
       const beat = d.alive && (w.artery ? Math.sin(simTime * 8 + w.t) > 0.55 : w.bleed > 0.6 && Math.sin(simTime * 7.5 + w.t) > 0.85);
       if ((w.drip >= 1 || beat) && spawned < (w.artery ? 7 : 4)) {
         if (w.drip >= 1) w.drip -= 1;
-        spawned++;
         const p = fromC(w.part.body.pointToWorldFrame(w.local)), bv = w.part.body.velocity;
+        if (still && !beat && p.y - groundY(p.x, p.z) < 0.4) continue;      // lying on it: it runs straight into the pool (counted there)
+        spawned++;
         const out = p.clone().sub(fromC(w.part.body.position)).normalize();
         const v = new THREE.Vector3(bv.x, bv.y, bv.z).multiplyScalar(0.9).addScaledVector(out, beat ? (w.artery ? 1.4 + Math.random() * 1.6 : 0.6 + Math.random() * 0.8) : 0.08);
-        spawnDrop(p, v, 0.003 + Math.min(0.005, w.bleed * 0.004) + Math.random() * 0.002);
+        spawnDrop(p, v, (beat ? 0.0045 : 0.0038) + Math.min(0.004, w.bleed * 0.003) + Math.random() * 0.002);
       }
     }
-    // lying still: it bleeds into a pool under the worst wound
-    const pel = d.parts[J.pelvis].body;
-    const still = (!d.alive || d.localMode || d.state === 'crawl') && Math.hypot(pel.velocity.x, pel.velocity.y, pel.velocity.z) < 0.35;
-    if (worst && still && total > 0.03) {
-      const p = fromC(worst.part.body.pointToWorldFrame(worst.local)), gy = groundY(p.x, p.z);
-      if (p.y - gy < 0.45) {
-        const P = poolAt(d, p.x, p.z, gy);
-        P.r = Math.min(P.max + Math.min(0.4, total * 0.3), P.r + dt * Math.min(0.08, total * 0.05) / (1 + P.r * 3));
-        P.mesh.scale.setScalar(P.r * 2);
-      }
+    // lying still: it bleeds into a pool (the volume is the blood it is actually losing)
+    // (each wound feeds the ground under it; pools from two wounds run together)
+    if (still) for (const w of d.wounds) {
+      if (w.bleed < 0.05) continue;
+      const p = fromC(w.part.body.pointToWorldFrame(w.local)), gy = groundY(p.x, p.z);
+      if (p.y - gy < 0.4) poolFeed(p.x, p.z, gy, w.bleed * 8.5 * dt * (d.alive ? 1 : 0.6), w);
     }
   }
-  // droplets in flight
-  const m = B.dropMesh; let n = 0;
+  // droplets in flight: anything solid in the way stops them
   for (let i = B.drops.length - 1; i >= 0; i--) {
     const dr = B.drops[i]; dr.t += dt;
-    dr.v.y -= 9.8 * dt; dr.v.multiplyScalar(1 - dt * 0.4);
+    const p0 = _dQ.copy(dr.p);                                   // (its own scratch: decalMatrix uses _dX)
+    dr.v.y -= 9.8 * dt; dr.v.multiplyScalar(1 - dt * (0.25 + 0.004 / Math.max(0.002, dr.s)));
     dr.p.addScaledVector(dr.v, dt);
-    const gy = groundY(dr.p.x, dr.p.z);
-    if (dr.p.y <= gy + 0.003 || dr.t > 3) {
-      if (dr.t <= 3) {
-        const hs = Math.hypot(dr.v.x, dr.v.z), sp = dr.v.length();
-        addSplat(new THREE.Vector3(dr.p.x, gy, dr.p.z), _UPV, dr.s * (3 + Math.min(5, sp * 0.9)) * (0.8 + Math.random() * 0.5), dr.v, 1 + Math.min(3, hs * 0.5));
-        // a fast drop throws a couple of tiny satellite droplets ahead of it
-        if (hs > 2.5 && Math.random() < 0.5) addSplat(new THREE.Vector3(dr.p.x + dr.v.x * 0.03, gy, dr.p.z + dr.v.z * 0.03), _UPV, dr.s * 1.5, dr.v, 2);
-      }
-      B.drops.splice(i, 1); continue;
-    }
+    const h = bloodSegHit(p0, dr.p);
+    if (h) { const q = p0.lerp(dr.p, h.t).addScaledVector(h.n, h.lift); dropLands(dr, q, h.n, h.b); B.drops.splice(i, 1); continue; }
+    if (dr.t > 3 || dr.p.y < -1) B.drops.splice(i, 1);
   }
+  const m = B.dropMesh; let n = 0;
   for (const dr of B.drops) {
     const sp = dr.v.length();
     _bo.position.copy(dr.p);
@@ -4270,49 +4515,19 @@ function updateBlood(dt) {
     _bo.updateMatrix(); m.setMatrixAt(n++, _bo.matrix);
   }
   m.count = n; m.instanceMatrix.needsUpdate = true;
+  updateRuns(dt);
+  for (let i = B.bodyRuns.length - 1; i >= 0; i--) { const r = B.bodyRuns[i]; r.t += dt; const k = Math.min(1, r.t / r.dur); r.m.scale.y = r.len * (1 - Math.pow(1 - k, 2.2)) + 0.001; if (k >= 1) B.bodyRuns.splice(i, 1); }
+  if (B.acc.size && Math.random() < dt) for (const [k, a] of B.acc) if (simTime - a.t > 12) B.acc.delete(k);
 }
 
-// ---- smears: bloody parts dragged over the ground paint a streaky trail; bloody feet leave prints ----
-const bloodSmearTex = canvasTex(64, (x, s) => {
-  // streaks run along the drag (u); soft, broken edges across it (v). Constant along u, so segments join seamlessly.
-  for (let y = 0; y < s; y++) {
-    const v = y / (s - 1), edge = Math.pow(Math.sin(Math.PI * v), 0.6);
-    const streak = 0.55 + 0.45 * Math.abs(Math.sin(v * 37.0 + Math.sin(v * 13.0) * 2.0)) * (0.6 + 0.4 * Math.sin(v * 91.0));
-    x.fillStyle = `rgba(255,255,255,${(edge * streak).toFixed(3)})`; x.fillRect(0, y, s, 1);
-  }
-});
-bloodSmearTex.wrapS = THREE.RepeatWrapping;
-const matBloodSmear = new THREE.MeshStandardMaterial({ map: bloodSmearTex, color: '#ffffff', roughness: 0.3, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -5 });
-matBloodSmear.onBeforeCompile = sh => {
-  sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute float instanceAlpha;\nvarying float vIA;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvIA = instanceAlpha;');
-  sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vIA;')
-    .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.a *= vIA;');
-};
-B.smearMax = Math.round(900 * BQ); B.smearI = 0; B.smearN = 0;
-B.smearMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), matBloodSmear, B.smearMax);
-B.smearMesh.count = 0; B.smearMesh.frustumCulled = false; B.smearMesh.renderOrder = 1;
-B.smearMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(B.smearMax * 3), 3);
-B.smearAlpha = new THREE.InstancedBufferAttribute(new Float32Array(B.smearMax), 1);
-B.smearMesh.geometry.setAttribute('instanceAlpha', B.smearAlpha);
-scene.add(B.smearMesh);
-// flat strip from a to b on the ground (or along a surface with normal n)
-function addSmear(a, b, width, alpha, gy) {
-  const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz);
-  if (len < 1e-3) return;
-  _bo.position.set((a.x + b.x) / 2, gy + 0.0045, (a.z + b.z) / 2);
-  _bo.quaternion.setFromUnitVectors(_ZV, _UPV);
-  _bq.setFromAxisAngle(_UPV, Math.atan2(-dz, dx)); _bo.quaternion.premultiply(_bq);
-  _bo.scale.set(len + width * 0.15, width, 1);
-  _bo.updateMatrix();
-  const i = B.smearI; B.smearI = (B.smearI + 1) % B.smearMax; B.smearN = Math.min(B.smearMax, B.smearN + 1);
-  B.smearMesh.setMatrixAt(i, _bo.matrix);
-  _bc.setRGB(0.11 + Math.random() * 0.03, 0.003, 0.003); B.smearMesh.setColorAt(i, _bc);
-  B.smearAlpha.setX(i, alpha);
-  B.smearMesh.count = B.smearN; B.smearMesh.instanceMatrix.needsUpdate = true; B.smearMesh.instanceColor.needsUpdate = true; B.smearAlpha.needsUpdate = true;
-}
+// ---- smears: bloody parts dragged over the ground or slid down a wall; bloody shoes and hands print ----
 // how wide a streak each part leaves, and how close to the ground its centre is when it's lying on it
 const SMEAR_W = { pelvis: [0.26, 0.17], abdomen: [0.22, 0.17], chest: [0.28, 0.19], head: [0.15, 0.15], uarmL: [0.09, 0.09], uarmR: [0.09, 0.09], farmL: [0.08, 0.08], farmR: [0.08, 0.08], thighL: [0.13, 0.12], thighR: [0.13, 0.12], shinL: [0.09, 0.09], shinR: [0.09, 0.09], footL: [0.09, 0.08], footR: [0.09, 0.08] };
+function bloodPrint(p, n, along, kind, strength) {
+  const [cu, cv] = cellUV(kind === 'palm' ? BC.palm : BC.shoe);
+  B.splats.add(decalMatrix(p, n, along, kind === 'palm' ? 0.26 : 0.3, kind === 'palm' ? 0.26 : 0.3, 0.003), clamp(strength, 0.15, 0.95), cu, cv);
+}
+const _dA = new THREE.Vector3(), _dB = new THREE.Vector3(), _dN = new THREE.Vector3();
 function updateSmears(dt) {
   for (const d of dummies) {
     // blood soaks the parts around each open wound; lying in a pool soaks whatever touches it
@@ -4324,42 +4539,83 @@ function updateSmears(dt) {
       if (par) par.bloody = Math.max(par.bloody || 0, soak * 0.6);
       // a leg wound runs down into the shoe: bloody footprints
       if (d.alive && w.part.seg.zone === 'leg') { const ft = d.parts[J[w.part.seg.side > 0 ? 'footL' : 'footR']]; ft.bloody = Math.max(ft.bloody || 0, soak * 0.8); }
+      // a hand pressed to a wound comes away red
+      if (d.alive && d.ik) for (const k of ['L', 'R']) if (d.ik[k] && d.ik[k].w > 0.5 && d.state !== 'crawl') { const f = d.parts[J['farm' + k]]; f.bloody = Math.max(f.bloody || 0, soak * 0.7); }
     }
     const upright = d.alive && d.state === 'stand';
     for (const part of d.parts) {
-      const b = part.body, n = part.seg.n, isFoot = n === 'footL' || n === 'footR';
+      const b = part.body, nm = part.seg.n, isFoot = nm === 'footL' || nm === 'footR';
       if (upright && !isFoot) { part.smear = null; continue; }
-      const gy = groundY(b.position.x, b.position.z), [wid, rest] = SMEAR_W[n];
+      const gy = groundY(b.position.x, b.position.z), [wid, rest] = SMEAR_W[nm];
       const touching = b.position.y - gy < rest + 0.05;
-      // stepping or lying in a pool
-      if (touching) for (const P of B.pools) if (P && P.mesh.visible && Math.hypot(P.x - b.position.x, P.z - b.position.z) < P.r * 0.9 && Math.abs(P.mesh.position.y - gy) < 0.05) { part.bloody = 1; break; }
+      if (touching && inPool(b.position.x, b.position.z, gy)) part.bloody = 1;            // lying or stepping in a pool
       const bl = part.bloody || 0;
       if (!touching || bl < 0.04) { part.smear = null; continue; }
-      const cur = { x: b.position.x, z: b.position.z };
+      const cur = new THREE.Vector3(b.position.x, gy, b.position.z);
       if (isFoot && upright) {
         // bloody soles: a print each time the foot plants, fading step by step
         const v = b.velocity;
-        if (Math.hypot(v.x, v.z) < 0.6 && b.position.y - gy < rest + 0.025 && (!part.smear || Math.hypot(cur.x - part.smear.x, cur.z - part.smear.z) > 0.4)) {
-          const f = b.quaternion.vmult(new CANNON.Vec3(0, 0, 1)), fl = Math.hypot(f.x, f.z) || 1;
-          const a = { x: cur.x - f.x / fl * 0.12, z: cur.z - f.z / fl * 0.12 }, c = { x: cur.x + f.x / fl * 0.12, z: cur.z + f.z / fl * 0.12 };
-          addSmear(a, c, wid, Math.min(0.85, bl), gy);
+        if (Math.hypot(v.x, v.z) < 0.6 && b.position.y - gy < rest + 0.025 && (!part.smear || cur.distanceTo(part.smear) > 0.4)) {
+          const f = b.quaternion.vmult(new CANNON.Vec3(0, 0, 1));
+          bloodPrint(cur, _UPV, _dA.set(f.x, 0, f.z), 'shoe', bl * 0.95);
           part.bloody = bl * 0.72; part.smear = cur;
         }
         continue;
       }
-      if (!part.smear) { part.smear = cur; continue; }
-      const L = Math.hypot(cur.x - part.smear.x, cur.z - part.smear.z);
+      if (!part.smear) { part.smear = cur; part.smearN = 0; continue; }
+      const L = cur.distanceTo(part.smear);
       if (L < 0.05) continue;
-      if (L > 0.6) { part.smear = cur; continue; }                    // jumped (thrown): start a new streak
-      addSmear(part.smear, cur, wid * (0.7 + 0.3 * bl) * (0.9 + Math.random() * 0.2), Math.min(0.85, 0.15 + bl * 0.7), gy);
+      if (L > 0.6) { part.smear = cur; part.smearN = 0; continue; }   // jumped (thrown): start a new streak
+      addSmear(part.smear, cur, _UPV, wid * (0.7 + 0.3 * bl) * (0.9 + Math.random() * 0.2), Math.min(0.95, 0.2 + bl * 0.8), !part.smearN++);
       part.bloody = Math.max(0, bl - L * 0.22);                         // runs out over a few metres
       part.smear = cur;
     }
   }
+  // bloody parts against walls (slumping down one, thrown into one, crawling along one): smears on the wall itself
+  for (const c of world.contacts) {
+    let pb = c.bi, ob = c.bj, sgn = 1;
+    if (!(pb.userData && pb.userData.kind === 'dummy')) { pb = c.bj; ob = c.bi; sgn = -1; }
+    if (!(pb.userData && pb.userData.kind === 'dummy') || !(ob.userData && ob.userData.kind === 'static') || ob.shapes[0].type === CANNON.Shape.types.PLANE) continue;
+    const d = pb.userData.dummy, part = d.parts[pb.userData.idx], bl = part.bloody || 0;
+    if (bl < 0.08) continue;
+    _dN.set(c.ni.x, c.ni.y, c.ni.z).multiplyScalar(-sgn);                // out of the wall, toward the body
+    if (Math.abs(_dN.y) > 0.6) continue;                                  // floors and tops are the ground smears' job
+    const ri = sgn > 0 ? c.ri : c.rj;
+    _dB.set(pb.position.x + ri.x, pb.position.y + ri.y, pb.position.z + ri.z);
+    { const wb = staticAtWall(_dB, _dN); if (wb && wb.blood) { if (!onPanel(wb, _dB, _dN)) continue; } else _dB.addScaledVector(_dN, skinLift(wb, _dB.y)); }
+    const ws = part.wsm;
+    if (!ws || simTime - ws.t > 0.25 || ws.n.dot(_dN) < 0.9) {
+      part.wsm = { p: _dB.clone(), n: _dN.clone(), t: simTime, k: 0 };
+      if (Math.hypot(pb.velocity.x, pb.velocity.y, pb.velocity.z) > 1.2 || /farm/.test(part.seg.n)) {      // an impact or a hand: a print where it struck
+        if (/farm/.test(part.seg.n)) bloodPrint(_dB, _dN, _dA.set(0, 1, 0), 'palm', bl);
+        else { const i = addSplat(_dB, _dN, SMEAR_W[part.seg.n][0] * 0.6, null, 1, 0, BC.roundB); B.splats.setInfo(i, BLOOD_T.value, 0.6 * bl); }
+        part.bloody = bl * 0.85;
+      }
+      continue;
+    }
+    ws.t = simTime;
+    const L = _dB.distanceTo(ws.p);
+    if (L < 0.04) continue;
+    addSmear(ws.p, _dB, _dN, SMEAR_W[part.seg.n][0] * (0.75 + 0.25 * bl), Math.min(0.85, 0.12 + bl * 0.65), !ws.k++);
+    // a heavy smear left on a wall keeps running
+    if (bl > 0.6 && Math.random() < 0.25) startRun(_dB, _dN, staticAtWall(_dB, _dN), 0.35 + bl * 0.3);
+    part.bloody = Math.max(0, bl - L * 0.3);
+    ws.p.copy(_dB);
+  }
 }
+// a contact on a car's rough box, moved onto the panel actually there (false if it's off the car's real shape)
+function onPanel(rec, p, n) {
+  const ax = Math.abs(n.x) > 0.5 ? 'x' : 'z', sg = Math.sign(n[ax]); let best = null;
+  for (const s of rec.blood) if (p.y >= s.y0 && p.y <= s.y1 && (ax === 'x' ? p.z >= s.z0 && p.z <= s.z1 : p.x >= s.x0 && p.x <= s.x1)) { const f = sg > 0 ? s[ax + '1'] : s[ax + '0']; if (best === null || (sg > 0 ? f > best : f < best)) best = f; }
+  if (best === null) return false;
+  p[ax] = best + sg * 0.001; return true;
+}
+// which box a point on a wall belongs to
+function staticAtWall(p, n) { for (const b of cellOf(p.x - n.x * 0.02, p.z - n.z * 0.02)) { const x = p.x - n.x * 0.02, z = p.z - n.z * 0.02; if (x >= b.x0 - 0.01 && x <= b.x1 + 0.01 && z >= b.z0 - 0.01 && z <= b.z1 + 0.01 && p.y >= b.y0 - 0.01 && p.y <= b.y1 + 0.01) return b; } return null; }
 function clearBlood() {
-  B.drops.length = 0; B.dropMesh.count = 0; B.splatN = 0; B.splatI = 0; B.splatMesh.count = 0; B.smearN = 0; B.smearI = 0; B.smearMesh.count = 0;
-  for (const P of B.pools) if (P) { P.mesh.visible = false; P.owner = null; }
+  B.drops.length = 0; B.dropMesh.count = 0; B.splats.clear(); B.smears.clear(); B.pool.clear();
+  for (const R of B.runs) R.done = true; B.runs.length = 0;
+  for (const P of B.pools) if (P.owner && P.owner.pool === P) P.owner.pool = null; B.pools.length = 0; B.acc.clear(); B.bodyRuns.length = 0;
 }
 function updateFx(dt) {
   for (let i = fx.length - 1; i >= 0; i--) {
@@ -4382,10 +4638,36 @@ function initAudio() {
       const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     }
     actx.resume();
+    loadShotSamples();
   } catch (e) { actx = null; }
+}
+// recorded gunshots (a Glock 17 and an M4A1 at a range): each shot plays the recording with a slightly different pitch and level,
+// so a string of shots never sounds machine-copied; on full auto the tails overlap the way the echo does
+const SHOT_MP3 = { pistol: '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', rifle: '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' };
+const SHOT_BUF = {}, shotVoices = [];
+function loadShotSamples() {
+  for (const k in SHOT_MP3) {
+    if (SHOT_BUF[k] !== undefined) continue;
+    SHOT_BUF[k] = null;
+    try {
+      const bin = atob(SHOT_MP3[k]), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      actx.decodeAudioData(u8.buffer, b => { SHOT_BUF[k] = b; }, () => { delete SHOT_BUF[k]; });
+    } catch (e) { delete SHOT_BUF[k]; }
+  }
+}
+function playShot(kind) {
+  const buf = SHOT_BUF[kind]; if (!buf) return false;
+  const t = actx.currentTime, src = actx.createBufferSource(), g = actx.createGain();
+  src.buffer = buf; src.playbackRate.value = 0.965 + Math.random() * 0.07;
+  g.gain.value = (kind === 'rifle' ? 1.25 : 1.15) * (0.9 + Math.random() * 0.15);
+  src.connect(g).connect(master); src.start(t);
+  shotVoices.push({ src, g }); src.onended = () => { const i = shotVoices.findIndex(v => v.src === src); if (i >= 0) shotVoices.splice(i, 1); };
+  if (shotVoices.length > 10) { const o = shotVoices.shift(); try { o.g.gain.setTargetAtTime(0, t, 0.03); o.src.stop(t + 0.15); } catch (e) { /* already done */ } }
+  return true;
 }
 function sound(kind) {
   if (!actx || muted) return;
+  if ((kind === 'rifle' || kind === 'pistol') && playShot(kind)) return;
   const t = actx.currentTime;
   const spec = { rifle: [2600, 0.16, 120, 1], pistol: [3600, 0.12, 170, 0.8], shotgun: [1500, 0.34, 90, 1.3], boom: [700, 1.2, 55, 1.6], click: [5000, 0.03, 0, 0.25], mag: [2400, 0.05, 0, 0.35], thud: [520, 0.28, 70, 1.0], tink: [9000, 0.07, 3400, 0.07], hull: [2200, 0.07, 520, 0.09] }[kind];
   const src = actx.createBufferSource(); src.buffer = noiseBuf;
@@ -4519,7 +4801,7 @@ function rail(parent, u0, u1, v, mat, w = 0.021) {
 function gripMarker(parent, pos, f, n, curl, opt = {}) {
   const o = new THREE.Object3D(); o.position.set(...pos);
   o.userData = { f: new THREE.Vector3(...f).normalize(), n: new THREE.Vector3(...n).normalize(), curl, home: o.position.clone(),
-    axis: opt.axis ? new THREE.Vector3(...opt.axis).normalize() : null, r: opt.r, spinLim: opt.spinLim, spinW: opt.spinW };
+    axis: opt.axis ? new THREE.Vector3(...opt.axis).normalize() : null, r: opt.r, spinLim: opt.spinLim, spinW: opt.spinW, keep: opt.keep, trigger: opt.trigger ? new THREE.Vector3(...opt.trigger) : null };
   parent.add(o); return o;
 }
 // Finger poses: thumb = [oppose, curl1, curl2], others = [curl1, curl2, curl3, spread toward the thumb] (radians)
@@ -4695,46 +4977,6 @@ function buildGrenadeHand() {
 
 // ---- soldier arms: the textured character's arms, posed by IK, everything else stripped ----
 let ARMS = null;
-// How much thinner the first-person sleeves and hands are drawn than the character's own (1 = as modelled)
-const ARM_SLIM = { upperarm: 0.62, lowerarm: 0.64, hand: 0.84 };
-// Pull each vertex of the first-person arms in toward the bone it hangs on, so sleeves and hands get thinner
-// without getting shorter. Works in the model's rest pose, before any bending.
-const comp4 = (attr, v, k) => k === 0 ? attr.getX(v) : k === 1 ? attr.getY(v) : k === 2 ? attr.getZ(v) : attr.getW(v);
-function slimArms(mesh, k) {
-  const g = mesh.geometry, pos = g.attributes.position, si = g.attributes.skinIndex, sw = g.attributes.skinWeight;
-  const bones = mesh.skeleton.bones, inv = mesh.skeleton.boneInverses;
-  const at = name => { const i = bones.findIndex(b => b.name === name || b.name === UE[name] || b.name.replace(/^mixamorig:?/, '') === name); return i < 0 ? null : new THREE.Vector3().setFromMatrixPosition(inv[i].clone().invert()); };
-  const seg = {};
-  for (const [u, S] of [['l', 'Left'], ['r', 'Right']]) {
-    const sh = at(S + 'Arm'), el = at(S + 'ForeArm'), wr = at(S + 'Hand'), mid = at(S + 'HandMiddle1') || at('middle_metacarpal_' + u);
-    if (sh && el) seg['upperarm_' + u] = [sh, el];
-    if (el && wr) seg['lowerarm_' + u] = [el, wr];
-    if (wr && mid) seg['hand_' + u] = [wr, wr.clone().add(mid.clone().sub(wr).multiplyScalar(1.6))];
-  }
-  // which part of the arm each bone belongs to (twist and corrective bones go with their limb; fingers with the hand)
-  const part = bones.map(b => {
-    const x = b.name.match(/^(?:mixamorig:?)?(Left|Right)(Arm|ForeArm|Hand)/);
-    if (x) { const limb = x[2] === 'Arm' ? 'upperarm' : x[2] === 'ForeArm' ? 'lowerarm' : 'hand', sd = x[1] === 'Left' ? 'l' : 'r'; return seg[limb + '_' + sd] ? [limb, seg[limb + '_' + sd]] : null; }
-    const m = b.name.match(/^(upperarm|lowerarm)_.*?([lr])$/) || b.name.match(/^(hand|wrist|thumb|index|middle|ring|pinky|weapon)_.*?([lr])$/);
-    if (!m) return null;
-    const limb = m[1] === 'upperarm' || m[1] === 'lowerarm' ? m[1] : 'hand';
-    return seg[limb + '_' + m[2]] ? [limb, seg[limb + '_' + m[2]]] : null;
-  });
-  const v = new THREE.Vector3(), c = new THREE.Vector3(), ab = new THREE.Vector3();
-  const bind = mesh.bindMatrix, bindInv = mesh.bindMatrix.clone().invert();   // (bindMatrixInverse tracks the mesh's current placement, not the rest pose)
-  for (let i = 0; i < pos.count; i++) {
-    let best = -1, bw = -1;
-    for (let k2 = 0; k2 < 4; k2++) { const w = comp4(sw, i, k2); if (w > bw) { bw = w; best = comp4(si, i, k2); } }   // (interleaved-safe reads)
-    const p = part[best]; if (!p) continue;
-    const [limb, [a, b]] = p, f = k[limb];
-    v.fromBufferAttribute(pos, i).applyMatrix4(bind);
-    ab.subVectors(b, a); const t = clamp(v.clone().sub(a).dot(ab) / ab.lengthSq(), -0.2, 1.2);
-    c.copy(a).addScaledVector(ab, t);                                   // nearest point on the bone's axis
-    v.sub(c).multiplyScalar(f).add(c).applyMatrix4(bindInv);
-    pos.setXYZ(i, v.x, v.y, v.z);
-  }
-  pos.needsUpdate = true;          // (normals kept: pulling straight in toward the bone barely turns them, and recomputing them on quantised data breaks them)
-}
 // ================= your character =================
 // A WW2 panzergrenadier on a Mixamo skeleton (the same bone names the stock rig uses, so the arm, rider and
 // walking code drive it directly); the head and helmet stay hidden from your own eyes but still throw their shadow.
@@ -4814,8 +5056,637 @@ function frameQ(d, r) {
   const z = new THREE.Vector3().crossVectors(x, y);
   return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
 }
+// ---- your own arms: bare, lean forearms and long-fingered hands ----
+// Swept as tubes along the rig's own arm, hand and finger bones in their rest pose, so the IK, grips and finger
+// curls drive them. Helper bones keep the skin clean where it bends and turns: the forearm takes the hand's turn
+// progressively from elbow to wrist (as the radius rolls over the ulna), and the elbow and wrist each fold halfway.
+// A short dark T-shirt sleeve covers the top of the upper arm.
+const SKIN_C = {
+  base: '#cf9c86', dorsal: '#c99683', palm: '#dfab9c', knuckle: '#d3968b', elbow: '#c79584', sleeve: '#232528',
+  // fingers are coloured by the texture: skin, joints, nails
+  fBack: '#c99683', fPalm: '#e0aa9c', fKnuckle: '#d08c83', fCrease: '#b97a6c', fPad: '#dea096',
+  nail: '#dfb1a5', lunula: '#ead0c6', nailEdge: '#efdfd5', cuticle: '#c08779', hair: 'rgba(58,38,26,',
+};
+// where the joints fall along each finger's strip of texture: base inside the palm, knuckle, middle joint, last joint, tip
+const FV = [0, 0.12, 0.45, 0.72, 1];
+const SKIN_V = { wrist: 0.78, knuckle: 1 };
+let SKIN_TEX = null;
+function skinTextures() {
+  if (SKIN_TEX) return SKIN_TEX;
+  const Wd = 1024, Ht = 1024, AW = Wd / 2;                     // left half: arm and palm (around × along); right half: five fingers
+  const mk = (fill) => { const c = document.createElement('canvas'); c.width = Wd; c.height = Ht; const x = c.getContext('2d'); x.fillStyle = fill; x.fillRect(0, 0, Wd, Ht); return [c, x]; };
+  const [cc, cx] = mk('#fff'), [bc, bx] = mk('#808080'), [rc, rx] = mk('rgb(140,140,140)');
+  let sd = 11; const rnd = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+  const line = (ctx, pts, style, w, blur = 0) => {
+    ctx.save(); if (blur) ctx.filter = `blur(${blur}px)`; ctx.strokeStyle = style; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.stroke(); ctx.restore();
+  };
+  // ----- arm and palm (multiplied over the vertex tones): u = round the limb (0 = middle of the palm side, 0.5 = back), v = along
+  // drawn three times across the strip so marks that cross the palm's seam carry on round the other side
+  const arm = fn => { for (const ctx of [cx, bx, rx]) { ctx.save(); ctx.beginPath(); ctx.rect(0, 0, AW, Ht); ctx.clip(); } for (const o of [-AW, 0, AW]) fn(o); for (const ctx of [cx, bx, rx]) ctx.restore(); };
+  const A = (u, v, o) => [o + u * AW, v * Ht];
+  const vw = SKIN_V.wrist;
+  arm(o => {
+    // barely-there blotching
+    let s0 = sd; sd = 5;
+    for (let i = 0; i < 260; i++) { const [x, y] = A(rnd(), rnd() * vw, o), r = 6 + rnd() * 22; cx.fillStyle = rnd() < 0.5 ? 'rgba(200,120,100,0.025)' : 'rgba(255,240,230,0.03)'; cx.beginPath(); cx.arc(x, y, r, 0, 7); cx.fill(); }
+    // pores
+    for (let i = 0; i < 9000; i++) { const g = 128 + (rnd() - 0.5) * 30 | 0; bx.fillStyle = `rgb(${g},${g},${g})`; const [x, y] = A(rnd(), rnd(), o); bx.fillRect(x, y, 1, 1); }
+    // tendons fanning over the back of the hand from the knuckles
+    for (const u of [0.37, 0.46, 0.54, 0.63]) {
+      const p = [A(u, 0.985, o), A(0.5 + (u - 0.5) * 0.6, vw + 0.08, o), A(0.5 + (u - 0.5) * 0.3, vw + 0.015, o)];
+      line(bx, p, '#b0b0b0', 7, 4); line(cx, p, 'rgba(255,245,238,0.12)', 6, 3);
+    }
+    // a few soft veins: an arch over the back of the hand draining up both sides of the forearm
+    sd = 21;
+    const vein = (pts, w) => { const p = pts.map(([u, v]) => A(u, v, o)); line(cx, p, 'rgba(115,128,165,0.15)', w * 2.4, 3.5); line(bx, p, '#b4b4b4', w * 2.2, 3); };
+    vein([[0.36, vw + 0.04], [0.41, vw + 0.1], [0.5, vw + 0.125], [0.59, vw + 0.11], [0.65, vw + 0.05]], 3);
+    vein([[0.47, 0.975], [0.48, vw + 0.12]], 2.2); vein([[0.56, 0.97], [0.55, vw + 0.115]], 2.2);
+    vein([[0.36, vw + 0.04], [0.32, vw - 0.03], [0.33, 0.62], [0.38, 0.5], [0.41, 0.42]], 3.2);
+    vein([[0.65, vw + 0.05], [0.69, vw - 0.03], [0.68, 0.6], [0.63, 0.48]], 2.8);
+    vein([[0.33, 0.66], [0.42, 0.6], [0.5, 0.52]], 2.2);
+    vein([[0.1, vw - 0.01], [0.12, 0.66], [0.16, 0.55]], 2); vein([[0.9, vw - 0.01], [0.88, 0.64]], 2);
+    // palm: wrist creases, the three main lines, the crease round the thumb's root
+    const P = (px, v) => A(px >= 0 ? px * 0.22 : px * 0.22, v, o);           // px: −1 little-finger edge … +1 thumb edge, across the palm side
+    for (const dv of [0.006, 0.016]) line(cx, [P(-0.45, vw + dv), P(0, vw + dv + 0.003), P(0.45, vw + dv)], 'rgba(150,85,70,0.18)', 1.5, 0.7);
+    const pl = (pts, a) => { const p = pts.map(([x, v]) => P(x, v)); line(cx, p, `rgba(140,75,62,${a * 0.5})`, 1.6, 0.9); line(bx, p, '#6a6a6a', 2, 1.1); };
+    pl([[-1, 0.925], [-0.6, 0.93], [-0.1, 0.945], [0.25, 0.965], [0.35, 0.975]], 0.42);                // heart line
+    pl([[0.9, 0.9], [0.5, 0.905], [0, 0.915], [-0.5, 0.93], [-0.75, 0.935]], 0.4);                     // head line
+    pl([[0.9, 0.897], [0.65, 0.87], [0.48, 0.84], [0.4, 0.81], [0.38, vw + 0.02]], 0.42);             // life line round the thumb
+    pl([[0.05, vw + 0.03], [0.02, 0.86], [-0.05, 0.92]], 0.18);                                         // a faint fate line
+    // hair: fine and short, on the back and outside of the forearm and the back of the wrist
+    sd = 33;
+    const hairs = (n, v0, v1, uc, uw, a) => {
+      for (let i = 0; i < n; i++) {
+        const u = uc + (rnd() + rnd() + rnd() - 1.5) * uw, v = v0 + rnd() * (v1 - v0), L = 7 + rnd() * 9, ang = (rnd() - 0.5) * 0.7 + (u - 0.5) * 0.8;
+        const [x, y] = A(u, v, o);
+        cx.strokeStyle = SKIN_C.hair + (a * (0.5 + rnd() * 0.6)).toFixed(3) + ')'; cx.lineWidth = 0.7; cx.beginPath(); cx.moveTo(x, y); cx.quadraticCurveTo(x + Math.sin(ang) * L * 0.5 + 1, y + L * 0.5, x + Math.sin(ang) * L, y + Math.cos(ang) * L); cx.stroke();
+      }
+    };
+    hairs(700, 0.36, vw - 0.005, 0.56, 0.2, 0.075); hairs(160, 0.12, 0.42, 0.56, 0.22, 0.05); hairs(90, vw - 0.005, vw + 0.07, 0.5, 0.12, 0.05);
+    // a few creases on the point of the elbow
+    for (let i = 0; i < 4; i++) { const v = 0.4 + i * 0.008; line(bx, [A(0.7, v, o), A(0.75, v + 0.004, o), A(0.8, v, o)], '#6c6c6c', 1.5, 0.8); }
+    // roughness: palms a little smoother and shinier than the forearm
+    rx.fillStyle = 'rgb(140,140,140)'; rx.fillRect(o, vw * Ht, AW * 0.23, Ht * (1 - vw)); rx.fillRect(o + AW * 0.77, vw * Ht, AW * 0.23, Ht * (1 - vw));
+    sd = s0;
+  });
+  // ----- the fingers: full colour (their vertex colour is white); u = round the finger (0 = pad side, 0.5 = back), v = FV
+  const col = s => new THREE.Color(s), lerpC = (a, b, t) => a.clone().lerp(b, t), css = c => '#' + c.getHexString();
+  for (let fi = 0; fi < 5; fi++) {
+    const thumb = fi === 0, x0 = AW + fi * Wd * 0.1, cw = Wd * 0.1, X = u => x0 + cw * (0.03 + 0.94 * u), Y = v => v * Ht;
+    const bk = col(SKIN_C.fBack), pm = col(SKIN_C.fPalm);
+    // base tone: back to pad round the finger
+    for (let px = 0; px < cw; px++) {
+      const u = (px / cw - 0.03) / 0.94, s = Math.sin(2 * Math.PI * u - Math.PI / 2);
+      const c = lerpC(bk, pm, Math.max(0, -s) * 0.9);
+      const g = cx.createLinearGradient(0, 0, 0, Ht);
+      g.addColorStop(0, css(c)); g.addColorStop(0.8, css(c)); g.addColorStop(1, css(lerpC(c, col(SKIN_C.fPad), Math.max(0, -s) * 0.6)));
+      cx.fillStyle = g; cx.fillRect(x0 + px, 0, 1, Ht);
+    }
+    const blob = (u, v, rxp, ryp, c, a) => { const g = cx.createRadialGradient(X(u), Y(v), 0, X(u), Y(v), rxp); g.addColorStop(0, c.replace(')', `,${a})`).replace('rgb', 'rgba')); g.addColorStop(1, c.replace(')', ',0)').replace('rgb', 'rgba')); cx.save(); cx.translate(X(u), Y(v)); cx.scale(1, ryp / rxp); cx.translate(-X(u), -Y(v)); cx.fillStyle = g; cx.fillRect(X(u) - rxp, Y(v) - rxp, rxp * 2, rxp * 2); cx.restore(); };
+    // knuckle and joint tints on the back
+    blob(0.5, FV[1], cw * 0.4, 46, 'rgb(205,130,118)', 0.55);
+    blob(0.5, FV[2], cw * 0.32, 34, 'rgb(200,128,116)', 0.5);
+    blob(0.5, FV[3], cw * 0.26, 24, 'rgb(200,130,118)', 0.4);
+    // wrinkles over the middle and last joints (grooves in the bump, faint lines in the colour)
+    const wrink = (v, n, span, gap, a) => {
+      for (let i = 0; i < n; i++) {
+        const vv = v + (i - (n - 1) / 2) * gap, sp = span * (1 - Math.abs(i - (n - 1) / 2) / n * 0.6), bend = 0.004 * (rnd() - 0.3);
+        const pts = []; for (let k = 0; k <= 8; k++) { const u = 0.5 - sp + 2 * sp * k / 8; pts.push([X(u), Y(vv + bend * Math.sin(Math.PI * k / 8) + (rnd() - 0.5) * 0.0012)]); }
+        line(cx, pts, `rgba(150,90,78,${a * 0.6})`, 1.1, 0.5); line(bx, pts, '#666', 1.6, 0.7);
+      }
+    };
+    wrink(FV[2] + (thumb ? 0 : 0.004), thumb ? 3 : 5, 0.16, 0.009, 0.4);
+    wrink(FV[3], 3, 0.11, 0.008, 0.32);
+    if (!thumb) wrink(FV[1] - 0.01, 2, 0.12, 0.012, 0.15);
+    // flexion creases on the pad side (split across the strip's two edges)
+    for (const [v, a] of [[FV[1] + 0.012, 0.5], [FV[2] - 0.006, 0.5], [FV[2] + 0.008, 0.35], [FV[3] - 0.003, 0.45]]) for (const [u0, u1] of [[0.0, 0.17], [0.83, 1.0]]) {
+      const pts = [[X(u0), Y(v)], [X((u0 + u1) / 2), Y(v + 0.002)], [X(u1), Y(v)]]; line(cx, pts, `rgba(140,78,66,${a})`, 1.5, 0.5); line(bx, pts, '#555', 2, 0.6);
+    }
+    // the nail: a rounded plate from just past the last joint to the free edge, with its pale half-moon
+    const n0 = FV[3] + (thumb ? 0.07 : 0.08), n1 = 0.975, hw = thumb ? 0.17 : 0.15;
+    const nailPath = ctx => { ctx.beginPath(); ctx.moveTo(X(0.5 - hw), Y(n1)); ctx.lineTo(X(0.5 - hw), Y(n0 + 0.04)); ctx.quadraticCurveTo(X(0.5 - hw), Y(n0), X(0.5), Y(n0)); ctx.quadraticCurveTo(X(0.5 + hw), Y(n0), X(0.5 + hw), Y(n0 + 0.04)); ctx.lineTo(X(0.5 + hw), Y(n1)); ctx.closePath(); };
+    cx.save(); nailPath(cx); cx.fillStyle = SKIN_C.nail; cx.fill(); cx.clip();
+    { const g = cx.createRadialGradient(X(0.5), Y(n0 + 0.005), 0, X(0.5), Y(n0 + 0.005), cw * 0.12); g.addColorStop(0, SKIN_C.lunula); g.addColorStop(1, 'rgba(240,217,207,0)'); cx.save(); cx.translate(X(0.5), Y(n0)); cx.scale(1, 0.9); cx.translate(-X(0.5), -Y(n0)); cx.fillStyle = g; cx.fillRect(X(0.5) - cw * 0.2, Y(n0) - 20, cw * 0.4, 60); cx.restore(); }
+    cx.fillStyle = SKIN_C.nailEdge; cx.globalAlpha = 0.85; cx.fillRect(X(0.5 - hw), Y(0.962), X(0.5 + hw) - X(0.5 - hw), Y(n1) - Y(0.962) + 2); cx.globalAlpha = 1;
+    for (let i = 0; i < 6; i++) { const u = 0.5 - hw * 0.8 + hw * 1.6 * i / 5; line(cx, [[X(u), Y(n0 + 0.02)], [X(u), Y(0.95)]], 'rgba(255,255,255,0.08)', 1, 0.6); }   // faint ridges
+    cx.restore();
+    cx.save(); nailPath(cx); cx.strokeStyle = SKIN_C.cuticle; cx.globalAlpha = 0.55; cx.lineWidth = 1.4; cx.stroke(); cx.restore();
+    bx.save(); nailPath(bx); bx.fillStyle = '#9a9a9a'; bx.fill(); bx.lineWidth = 2; bx.strokeStyle = '#5c5c5c'; bx.stroke(); bx.restore();
+    rx.save(); nailPath(rx); rx.fillStyle = 'rgb(58,58,58)'; rx.fill(); rx.restore();
+    // a few hairs on the back of the first segment
+    for (let i = 0; i < (thumb ? 2 : 4); i++) { const u = 0.4 + rnd() * 0.2, v = FV[1] + 0.06 + rnd() * 0.18; cx.strokeStyle = SKIN_C.hair + '0.12)'; cx.lineWidth = 0.8; cx.beginPath(); cx.moveTo(X(u), Y(v)); cx.lineTo(X(u + (rnd() - 0.5) * 0.05), Y(v + 0.015)); cx.stroke(); }
+    // fine pore grain
+    for (let i = 0; i < 900; i++) { const g = 128 + (rnd() - 0.5) * 16 | 0; bx.fillStyle = `rgb(${g},${g},${g})`; bx.fillRect(x0 + rnd() * cw, rnd() * Ht * 0.97, 1, 1); }
+  }
+  const tex = (c, srgb) => { const t = new THREE.CanvasTexture(c); t.flipY = false; t.anisotropy = 8; if (srgb) t.colorSpace = THREE.SRGBColorSpace; return t; };
+  return (SKIN_TEX = { map: tex(cc, true), bump: tex(bc, false), rough: tex(rc, false) });
+}
+// one arm, shoulder to fingertips; B = the rig's bones by Mixamo name, nm = 'Right' or 'Left'; A = that arm's IK record
+function buildSkinArm(B, nm, root, A) {
+  const W = n => B[n].getWorldPosition(new THREE.Vector3());
+  const armBone = B[nm + 'Arm'], foreBone = B[nm + 'ForeArm'], handBone = B[nm + 'Hand'];
+  // helper bones: three that share out the forearm's turn, and two that each take half a joint's fold
+  const tw = [0, 0.5, 1].map(t => { const b = new THREE.Bone(); b.name = nm + 'ForeTwist' + t; b.position.copy(handBone.position).multiplyScalar(t); foreBone.add(b); return { bone: b, t }; });
+  const elbowH = new THREE.Bone(); elbowH.name = nm + 'ElbowHalf'; elbowH.position.copy(foreBone.position); armBone.add(elbowH);
+  const wristH = new THREE.Bone(); wristH.name = nm + 'WristHalf'; tw[2].bone.add(wristH);
+  root.updateMatrixWorld(true);
+  const wq = o => o.getWorldQuaternion(new THREE.Quaternion());
+  A.tw = tw;
+  A.halves = [{ bone: elbowH, P: armBone, C: tw[0].bone }, { bone: wristH, P: tw[2].bone, C: handBone }].map(h => ({ ...h, R0inv: wq(h.P).invert().multiply(wq(h.C)).invert() }));
+  const bones = [], bi = b => { let i = bones.indexOf(b); if (i < 0) { i = bones.length; bones.push(b); } return i; };
+  const pS = W(nm + 'Arm'), pE = W(nm + 'ForeArm'), pW = W(nm + 'Hand'), pM = W(nm + 'HandMiddle1');
+  const f0 = pM.clone().sub(pW).normalize();
+  const lat = W(nm + 'HandIndex1').sub(W(nm + 'HandPinky1'));
+  const n0 = new THREE.Vector3().crossVectors(f0, lat).normalize(); if (n0.y > 0) n0.negate();
+  const dor = n0.clone().negate();                                         // the back of the hand
+  const X0 = lat.clone().addScaledVector(f0, -lat.dot(f0)).normalize();     // across the hand, toward the thumb
+  const hand = new THREE.Vector3().crossVectors(X0, dor).dot(f0);           // which way round this arm's frame turns (the two sides mirror)
+  const P = [], C = [], UV = [], SI = [], SW = [], IDX = [];
+  const CS = {}; for (const k in SKIN_C) if (SKIN_C[k][0] === '#') CS[k] = new THREE.Color(SKIN_C[k]);
+  const WHITE = new THREE.Color(1, 1, 1);
+  const mix = (a, b, t) => a.clone().lerp(b, clamp(t, 0, 1));
+  const se = (c, n) => Math.sign(c) * Math.pow(Math.abs(c), 2 / n);        // superellipse: rounder (n = 2) to boxier
+  const orth = (v, t) => v.clone().addScaledVector(t, -v.dot(t)).normalize();
+  const pushW = w => { const ws = w.filter(x => x[0] && x[1] > 1e-3).sort((a, b) => b[1] - a[1]).slice(0, 4); let s = 0; ws.forEach(x => s += x[1]); for (let k = 0; k < 4; k++) { SI.push(ws[k] ? bi(ws[k][0]) : 0); SW.push(ws[k] ? ws[k][1] / s : 0); } };
+  // rings[i][k] = { p, c, uv, w: [[bone, weight]…] }, K+1 per ring (the last sits on the first)
+  const tube = (rings, capEnd, capStart) => {
+    const base = P.length / 3, K = rings[0].length;
+    for (const r of rings) for (const v of r) { P.push(v.p.x, v.p.y, v.p.z); C.push(v.c.r, v.c.g, v.c.b); UV.push(v.uv[0], v.uv[1]); pushW(v.w); }
+    for (let i = 0; i + 1 < rings.length; i++) for (let k = 0; k + 1 < K; k++) { const a = base + i * K + k, b = a + 1, c = a + K, d = c + 1; IDX.push(a, c, b, b, c, d); }
+    const cap = (ri, last) => {
+      const r = rings[ri], c = new THREE.Vector3(); r.slice(0, K - 1).forEach(v => c.add(v.p)); c.multiplyScalar(1 / (K - 1));
+      const ci = P.length / 3; P.push(c.x, c.y, c.z); C.push(r[0].c.r, r[0].c.g, r[0].c.b);
+      const uc = r.reduce((s, v) => s + v.uv[0], 0) / K; UV.push(uc, r[0].uv[1]); pushW(r[0].w);
+      for (let k = 0; k + 1 < K; k++) { const a = base + ri * K + k; last ? IDX.push(a, ci, a + 1) : IDX.push(a, a + 1, ci); }
+    };
+    if (capEnd) cap(rings.length - 1, true);
+    if (capStart) cap(0, false);
+  };
+  const ARM_U = u => u * 0.5;                                                  // the arm's half of the texture
+  // ---------- the arm and palm: one tube from the shoulder to the knuckles ----------
+  const a = pS.distanceTo(pE), b = pE.distanceTo(pW);
+  const fingersN = ['Index', 'Middle', 'Ring', 'Pinky'];
+  const mcp = fingersN.map(f => { const p = W(nm + 'Hand' + f + '1').sub(pW); return { f, L: p.dot(f0), X: p.dot(X0), Y: p.dot(dor), bone: B[nm + 'Hand' + f + '1'] }; });
+  const halfW = (mcp[0].X - mcp[3].X) / 2 + 0.0115, cX = (mcp[0].X + mcp[3].X) / 2, cY = mcp.reduce((s, m) => s + m.Y, 0) / 4;
+  const mcpY = x => { const m = mcp; if (x >= m[0].X) return m[0].Y; if (x <= m[3].X) return m[3].Y; for (let i = 0; i < 3; i++) if (x <= m[i].X && x >= m[i + 1].X) { const t = (x - m[i + 1].X) / (m[i].X - m[i + 1].X); return m[i + 1].Y + (m[i].Y - m[i + 1].Y) * t; } return m[1].Y; };
+  const Lat = q => { // palm length at lateral position q (−1 little-finger side … +1 index side)
+    const x = cX + q * halfW, m = mcp; if (x >= m[0].X) return m[0].L; if (x <= m[3].X) return m[3].L;
+    for (let i = 0; i < 3; i++) if (x <= m[i].X && x >= m[i + 1].X) { const t = (x - m[i + 1].X) / (m[i].X - m[i + 1].X); return m[i + 1].L + (m[i].L - m[i + 1].L) * t; }
+    return m[1].L;
+  };
+  // cross-section half-widths along the arm, keyed by distance from the shoulder (m): [d, across, deep, squareness]
+  const prof = [[-0.02, 0.049, 0.049, 2], [0.08, 0.046, 0.047, 2], [0.16, 0.042, 0.043, 2], [a - 0.05, 0.037, 0.035, 2], [a, 0.0365, 0.032, 2],
+    [a + 0.16 * b, 0.0395, 0.033, 2], [a + 0.34 * b, 0.0378, 0.0305, 2.05], [a + 0.5 * b, 0.035, 0.027, 2.1], [a + 0.72 * b, 0.0305, 0.0215, 2.2], [a + 0.9 * b, 0.0282, 0.0183, 2.35], [a + b, 0.0278, 0.0172, 2.45]];
+  const profAt = d => { for (let i = 0; i + 1 < prof.length; i++) if (d <= prof[i + 1][0]) { const p0 = prof[i], p1 = prof[i + 1], t = smooth((d - p0[0]) / (p1[0] - p0[0])); return [p0[1] + (p1[1] - p0[1]) * t, p0[2] + (p1[2] - p0[2]) * t, p0[3] + (p1[3] - p0[3]) * t]; } const l = prof[prof.length - 1]; return [l[1], l[2], l[3]]; };
+  // skin weights along the arm: upper arm → half-fold elbow → the forearm's turning bones → half-fold wrist → hand
+  const armW = d => {
+    const sE = smooth((d - (a - 0.05)) / 0.1), wE = 0.8 * Math.exp(-(((d - a) / 0.036) ** 2));
+    const t = clamp((d - a) / b, 0, 1), up = (1 - sE) * (1 - wE), fo = sE * (1 - wE);
+    const wWr = 0.8 * Math.exp(-(((d - a - b) / 0.017) ** 2)), wH = smooth((d - (a + b - 0.02)) / 0.035);
+    const k = fo * (1 - wWr) * (1 - wH);
+    return [[armBone, up], [elbowH, wE], [tw[0].bone, k * Math.max(0, 1 - t / 0.5)], [tw[1].bone, k * Math.max(0, 1 - Math.abs(t - 0.5) / 0.5)], [tw[2].bone, k * Math.max(0, (t - 0.5) / 0.5)],
+      [wristH, fo * wWr], [handBone, fo * (1 - wWr) * wH]];
+  };
+  const K1 = 41, rings = [];
+  const dU = pE.clone().sub(pS).normalize(), dF = pW.clone().sub(pE).normalize();
+  const armDs = []; for (let d = -0.02; d < a + b - 1e-4; d += 0.008) armDs.push(d); armDs.push(a + b);
+  for (const d of armDs) {
+    const onFore = d > a, t = onFore ? (d - a) / b : d / a;
+    const ctr = onFore ? pE.clone().addScaledVector(dF, d - a) : pS.clone().addScaledVector(dU, d);
+    const tan = Math.abs(d - a) < 0.03 ? dU.clone().lerp(dF, smooth((d - a + 0.03) / 0.06)).normalize() : onFore ? dF : dU;
+    const x = orth(X0, tan), y = orth(dor, tan);
+    const [rx, ry, n] = profAt(d), w = armW(d), ring = [];
+    for (let k = 0; k < K1; k++) {
+      const u = k / (K1 - 1), ang = 2 * Math.PI * u - Math.PI / 2, ca = Math.cos(ang), sa = Math.sin(ang);
+      let ox = rx * se(ca, n), oy = ry * se(sa, n);
+      if (onFore) {   // the forearm's muscle rides up on the thumb side near the elbow; the ulna's ridge runs down the little-finger side
+        const m = Math.exp(-(((t - 0.22) / 0.17) ** 2));
+        ox += 0.0045 * m * Math.max(0, ca) * Math.max(0, sa + 0.3); oy += 0.0025 * m * Math.max(0, sa);
+        ox -= 0.0012 * Math.max(0, -ca) * smooth((t - 0.3) / 0.4) * Math.max(0, sa + 0.2);
+      }
+      const ol = Math.exp(-(((d - a) / 0.028) ** 2)) * Math.max(0, -ca - 0.55) * 0.014;   // the point of the elbow
+      ox -= ol;
+      const p = ctr.clone().addScaledVector(x, ox).addScaledVector(y, oy);
+      const c = mix(mix(CS.base, CS.dorsal, Math.max(0, sa) * smooth((d - a) / 0.1)), CS.palm, Math.max(0, -sa) * 0.55 * smooth((d - a - 0.4 * b) / (0.5 * b)));
+      if (ol > 0) c.lerp(CS.elbow, Math.min(1, ol / 0.007));
+      if (onFore) c.lerp(CS.knuckle, 0.22 * smooth((t - 0.55) / 0.45));                 // a little redder toward the wrist
+      ring.push({ p, c, uv: [ARM_U(u), SKIN_V.wrist * clamp(d, 0, a + b) / (a + b)], w });
+    }
+    rings.push(ring);
+  }
+  // the palm: flat, widening to the knuckles, padded underneath at the thumb's root, along the outer edge and under the knuckles
+  const Lmax = Math.max(...mcp.map(m => m.L));
+  const palmKeys = [[0, 0.0278, 0.0172, 2.45], [0.22, 0.0335, 0.0162, 2.7], [0.55, halfW * 0.97, 0.0138, 2.8], [0.85, halfW, 0.0124, 2.9], [1, halfW, 0.0113, 2.9], [1.025, halfW * 0.97, 0.0088, 2.7], [1.045, halfW * 0.86, 0.0042, 2.4]];
+  const palmAt = s => { for (let i = 0; i + 1 < palmKeys.length; i++) if (s <= palmKeys[i + 1][0]) { const p0 = palmKeys[i], p1 = palmKeys[i + 1], t = (s - p0[0]) / (p1[0] - p0[0]); return [p0[1] + (p1[1] - p0[1]) * t, p0[2] + (p1[2] - p0[2]) * t, p0[3] + (p1[3] - p0[3]) * t]; } const l = palmKeys[palmKeys.length - 1]; return [l[1], l[2], l[3]]; };
+  const sList = []; for (let i = 1; i <= 18; i++) sList.push(i / 18); sList.push(1.015, 1.03, 1.045);
+  let palmSurf = 0;
+  for (const s of sList) {
+    let [rx, ry, n] = palmAt(s); const cs = Math.min(s, 1);
+    const ph = s > 1 ? (s - 1) / 0.045 * 1.35 : 0;                                   // past the knuckle line: a dome round the joints (the knuckles' heads)
+    if (s > 1) { ry = 0.0113 * Math.cos(ph) ** 1.4; rx = halfW * (1 - 0.12 * ph / 1.35); }
+    const cx0 = cX * smooth(s / 0.6), cy0 = cY * smooth(s / 0.8);
+    const ring = [];
+    for (let k = 0; k < K1; k++) {
+      const u = k / (K1 - 1), ang = 2 * Math.PI * u - Math.PI / 2, ca = Math.cos(ang), sa = Math.sin(ang);
+      let ox = rx * se(ca, n), oy = ry * se(sa, n);
+      const xL = cx0 + ox, q = clamp((xL - cX) / halfW, -1, 1);
+      const L = Lat(q) * (s <= 1 ? s : 1) + (s > 1 ? 0.0094 * Math.sin(ph) : 0);
+      if (sa < 0) {
+        const th = Math.exp(-(((s - 0.3) / 0.22) ** 2)) * smooth((q + 0.1) / 0.8) * 0.0062, hy = Math.exp(-(((s - 0.45) / 0.3) ** 2)) * smooth((-q - 0.2) / 0.6) * 0.0038;
+        const pad = Math.exp(-(((s - 0.97) / 0.07) ** 2)) * 0.0026;
+        oy -= (th + hy + pad) * -sa;
+        oy += 0.0018 * Math.exp(-(((s - 0.55) / 0.2) ** 2)) * Math.exp(-((q / 0.4) ** 2)) * -sa;   // the hollow of the palm
+      }
+      let kn = 0;
+      if (sa > 0) mcp.forEach(m => { kn += Math.exp(-(((xL - m.X) / 0.0072) ** 2)) * Math.exp(-(((s - 0.93) / 0.07) ** 2)); });
+      oy += kn * 0.0018 * sa;
+      // toward the knuckles the back of the hand comes down to run smoothly into the fingers (arched across, middle knuckle highest)
+      const kT = smooth((s - 0.5) / 0.45);
+      if (kT > 0) {
+        const yM = mcpY(xL), se2 = se(sa, n);
+        const thin = Math.min(1, ry / 0.0113);                                   // past the knuckles it rounds off toward the joint
+        const yK = yM + (sa > 0 ? 0.0088 : 0.0122) * thin * se2;
+        const yB = cy0 + ry * se2;
+        oy = (yB + (yK - yB) * kT) - cy0 + (oy - ry * se2);
+      }
+      const p = pW.clone().addScaledVector(f0, L).addScaledVector(X0, xL).addScaledVector(dor, cy0 + oy);
+      if (s > 0.35 && s < 0.75 && sa < -0.5) palmSurf = Math.max(palmSurf, p.clone().sub(pW).dot(n0));
+      const c = mix(mix(CS.base, CS.dorsal, Math.max(0, sa)), CS.palm, Math.max(0, -sa) * 0.9);
+      c.lerp(CS.knuckle, Math.min(0.8, kn * 1.1));
+      // near the knuckles the skin follows the fingers a little as they close; near the wrist it folds with the wrist
+      const fw = mcp.map(m => [m.bone, 0.45 * smooth((cs - 0.8) / 0.25) * Math.exp(-(((xL - m.X) / 0.011) ** 2)) * (s > 1 ? 0.6 : 1)]);
+      const fs = fw.reduce((t, x) => t + x[1], 0), sc = fs > 0.6 ? 0.6 / fs : 1;
+      fw.forEach(x => x[1] *= sc);
+      const wWr = 0.8 * Math.exp(-((L / 0.017) ** 2));
+      const rest = 1 - fs * sc;
+      ring.push({ p, c, uv: [ARM_U(u), SKIN_V.wrist + (SKIN_V.knuckle - SKIN_V.wrist) * Math.min(s, 1)], w: [[wristH, rest * wWr], [handBone, rest * (1 - wWr)], ...fw] });
+    }
+    rings.push(ring);
+  }
+  tube(rings, true, true);
+  // ---------- fingers and thumb ----------
+  const FR = { Thumb: 0.0106, Index: 0.0089, Middle: 0.0093, Ring: 0.0087, Pinky: 0.0076 };
+  const contact = {};
+  const thumbKnots = [];
+  ['Thumb', ...fingersN].forEach((f, fi) => {
+    const pts = [1, 2, 3, 4].map(k => B[nm + 'Hand' + f + k] ? W(nm + 'Hand' + f + k) : null);
+    const bns = [1, 2, 3].map(k => B[nm + 'Hand' + f + k]);
+    if (!pts[3]) pts[3] = pts[2].clone().addScaledVector(pts[2].clone().sub(pts[1]), 0.85);
+    const R = FR[f], thumb = f === 'Thumb';
+    const d0 = pts[1].clone().sub(pts[0]).normalize();
+    const back = thumb ? 0.011 : 0.022;
+    const knots = [pts[0].clone().addScaledVector(thumb ? d0 : f0, -back).addScaledVector(dor, thumb ? 0 : -0.0015), ...pts];   // (a finger's root runs back along the palm, under the back of the hand)
+    if (thumb) thumbKnots.push(...pts);
+    const segL = []; let tot = 0; for (let i = 0; i + 1 < knots.length; i++) { const l = knots[i].distanceTo(knots[i + 1]); segL.push(l); tot += l; }
+    const jAt = [0]; for (const l of segL) jAt.push(jAt[jAt.length - 1] + l);
+    contact[f.toLowerCase()] = { r: R * 0.9, tip: B[nm + 'Hand' + f + '4'] || null, tipL: segL[3] };
+    // radius keyed along the finger (0 = base inside the palm, then each joint, then the tip)
+    const rKeys = thumb ? [[0, 1.0], [jAt[1] * 0.6, 1.35], [jAt[1], 1.3], [jAt[2], 1.06], [(jAt[2] + jAt[3]) / 2, 0.97], [jAt[3], 0.99], [tot - R, 0.92], [tot, 0.9]]
+      : [[0, 0.85], [jAt[1] - 0.006, 0.97], [jAt[1], 1.01], [jAt[1] + 0.006, 1.0], [(jAt[1] + jAt[2]) / 2, 0.92], [jAt[2], 0.97], [(jAt[2] + jAt[3]) / 2, 0.86], [jAt[3], 0.88], [tot - R, 0.83], [tot, 0.8]];
+    const rAt = d => { for (let i = 0; i + 1 < rKeys.length; i++) if (d <= rKeys[i + 1][0]) { const t = smooth((d - rKeys[i][0]) / Math.max(1e-6, rKeys[i + 1][0] - rKeys[i][0])); return R * (rKeys[i][1] + (rKeys[i + 1][1] - rKeys[i][1]) * t); } return R * rKeys[rKeys.length - 1][1]; };
+    const vAt = d => { for (let i = 0; i < 4; i++) if (d <= jAt[i + 1]) return FV[i] + (FV[i + 1] - FV[i]) * (d - jAt[i]) / segL[i]; return 1; };
+    const along = d => { let i = 0; while (i < segL.length - 1 && d > jAt[i + 1]) i++; const t = clamp((d - jAt[i]) / segL[i], 0, 1); return knots[i].clone().lerp(knots[i + 1], t); };
+    const dirAt = d => { const e = 0.004; return along(Math.min(tot, d + e)).sub(along(Math.max(0, d - e))).normalize(); };
+    const upRef = thumb ? X0.clone().multiplyScalar(0.75).addScaledVector(dor, 0.65) : dor;
+    const K2 = thumb ? 19 : 19, fr = [];
+    const endD = tot - R * 0.85, ds = []; for (let d = 0; d < endD; d += Math.abs(d - jAt[1]) < 0.01 ? 0.0015 : 0.003) ds.push(d); ds.push(endD);
+    const wOf = d => {   // the hand inside the palm, then each joint's bone, blended across the joints
+      const out = [[handBone, 1 - smooth((d - jAt[1] + 0.006) / 0.012)]];
+      for (let k = 0; k < 3; k++) {
+        if (!bns[k]) continue;
+        const lo = smooth((d - jAt[k + 1] + 0.006) / 0.012), hi = k < 2 && bns[k + 1] ? smooth((d - jAt[k + 2] + 0.0045) / 0.009) : 0;
+        out.push([bns[k], lo * (1 - hi)]);
+      }
+      return out;
+    };
+    const U0 = 0.5 + fi * 0.1;
+    const ringAt = (d, rs) => {
+      const dd = Math.min(d, tot), p = along(dd), t = dirAt(dd), y = orth(upRef, t), x = new THREE.Vector3().crossVectors(y, t);
+      if (hand < 0) x.negate();
+      const r = rAt(dd) * rs, ring = [], v = vAt(dd);
+      const nailK = smooth((v - FV[3] - 0.06) / 0.04) * (d <= tot ? 1 : 0);
+      for (let k = 0; k < K2; k++) {
+        const u = k / (K2 - 1), ang = 2 * Math.PI * u - Math.PI / 2, ca = Math.cos(ang), sa = Math.sin(ang);
+        let ox = r * 1.06 * se(ca, 2.2), oy = r * (sa > 0 ? 0.88 : 0.93) * se(sa, sa > 0 ? 2.2 + nailK * 0.8 : 2.2);   // the nail flattens the top of the last segment
+        if (!thumb && sa > 0) oy *= 0.76 + 0.24 * smooth((dd - jAt[1] + 0.003) / 0.008);   // under the back of the hand until it leaves the knuckle
+        if (sa < 0 && v > FV[3]) oy *= 1 + 0.06 * Math.sin(Math.PI * clamp((v - FV[3]) / (1 - FV[3]), 0, 1));       // the fingertip's pad
+        const pp = p.clone().addScaledVector(x, ox).addScaledVector(y, oy);
+        ring.push({ p: pp, c: WHITE, uv: [U0 + 0.1 * (0.03 + 0.94 * u), v], w: wOf(dd) });
+      }
+      fr.push(ring);
+    };
+    for (const d of ds) ringAt(d, 1);
+    for (const ph of [0.35, 0.65, 0.9]) ringAt(endD + R * 0.85 * Math.sin(ph * Math.PI / 2) * 1.05, Math.cos(ph * Math.PI / 2) + 0.06);
+    tube(fr, true, true);
+  });
+  // ---------- the web of skin between the thumb and the index finger ----------
+  {
+    const T1 = thumbKnots[0], T2 = thumbKnots[1], T3 = thumbKnots[2], tEnd = T2.clone().lerp(T3, 0.4);
+    const Pa = pW.clone().addScaledVector(f0, 0.03).addScaledVector(X0, halfW * 0.7 + cX * 0.5).addScaledVector(dor, cY * 0.4);
+    const Pb = W(nm + 'HandIndex1').addScaledVector(X0, 0.003).addScaledVector(f0, -0.006);
+    const th1 = B[nm + 'HandThumb1'], th2 = B[nm + 'HandThumb2'];
+    const N = 9, K3 = 15, web = [];
+    for (let i = 0; i <= N; i++) {
+      const t = i / N, T = t < 0.6 ? T1.clone().lerp(T2, t / 0.6) : T2.clone().lerp(tEnd, (t - 0.6) / 0.4), E = Pa.clone().lerp(Pb, t);
+      const C = T.clone().add(E).multiplyScalar(0.5), m = E.clone().sub(T), hl = m.length() / 2; m.normalize();
+      const nxt = (() => { const t2 = Math.min(1, t + 0.05), T_ = t2 < 0.6 ? T1.clone().lerp(T2, t2 / 0.6) : T2.clone().lerp(tEnd, (t2 - 0.6) / 0.4); return T_.add(Pa.clone().lerp(Pb, t2)).multiplyScalar(0.5); })();
+      const tan = (t < 1 ? nxt.sub(C) : C.clone().sub(Pa.clone().lerp(Pb, 0.95).add(T2.clone().lerp(tEnd, 0.875)).multiplyScalar(0.5))).normalize();
+      let nn = orth(n0, m); if (Math.sign(new THREE.Vector3().crossVectors(m, nn).dot(tan)) !== Math.sign(hand)) nn.negate();
+      const th = 0.0075 + (0.0032 - 0.0075) * smooth(t);
+      const wb2 = smooth((t - 0.5) / 0.4), ring = [];
+      for (let k = 0; k < K3; k++) {
+        const u = k / (K3 - 1), ph = 2 * Math.PI * u, cq = Math.cos(ph), sq = Math.sin(ph);
+        const p = C.clone().addScaledVector(m, hl * cq).addScaledVector(nn, th * sq);
+        const wT = smooth((-cq + 0.35) / 1.1);
+        const side = nn.dot(dor) * sq;
+        ring.push({ p, c: mix(CS.base, CS.palm, Math.max(0, -side) * 0.9), uv: [ARM_U(0.24 + 0.02 * sq), SKIN_V.wrist + 0.08 + 0.12 * t], w: [[handBone, 1 - wT], [th1, wT * (1 - wb2)], [th2, wT * wb2]] });
+      }
+      web.push(ring);
+    }
+    tube(web, true, true);
+  }
+  const skinEnd = IDX.length;
+  // ---------- a short T-shirt sleeve over the top of the upper arm ----------
+  const sl = [];
+  for (const d of [-0.03, 0.02, 0.06, 0.09, 0.105, 0.112]) {
+    const [rx, ry] = profAt(d), ctr = pS.clone().addScaledVector(dU, d), x = orth(X0, dU), y = orth(dor, dU);
+    const flare = d > 0.08 ? 0.006 : 0.0045, ring = [];
+    for (let k = 0; k < K1; k++) {
+      const u = k / (K1 - 1), ang = 2 * Math.PI * u - Math.PI / 2, ca = Math.cos(ang), sa = Math.sin(ang);
+      const wav = 0.0015 * Math.sin(ang * 3 + d * 40);
+      const p = ctr.clone().addScaledVector(x, (rx + flare + wav) * ca).addScaledVector(y, (ry + flare + wav) * sa);
+      ring.push({ p, c: CS.sleeve.clone().multiplyScalar(d > 0.1 ? 0.8 : 1), uv: [0.25, 0.05], w: [[armBone, 1]] });
+    }
+    sl.push(ring);
+  }
+  sl.push(sl[sl.length - 1].map(v => ({ ...v, p: v.p.clone().lerp(pS.clone().addScaledVector(dU, 0.112), 0.08).addScaledVector(dU, -0.01) })));   // the hem turns back inside
+  tube(sl, false, true);
+  // ---------- the mesh ----------
+  const g = new THREE.BufferGeometry();
+  const pos = new THREE.Float32BufferAttribute(P, 3); pos.applyMatrix4(root.matrixWorld.clone().invert());
+  g.setAttribute('position', pos);
+  g.setAttribute('color', new THREE.Float32BufferAttribute(C, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(UV, 2));
+  g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(SI, 4));
+  g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(SW, 4));
+  if (hand > 0) for (let i = 0; i < IDX.length; i += 3) { const t = IDX[i + 1]; IDX[i + 1] = IDX[i + 2]; IDX[i + 2] = t; }   // triangles face outward on both sides
+  g.setIndex(IDX);
+  g.addGroup(0, skinEnd, 0); g.addGroup(skinEnd, IDX.length - skinEnd, 1);
+  g.computeVertexNormals();
+  // weld the normals along each tube's seam (the first and last vertex of a ring sit in the same place)
+  const nrm = g.attributes.normal, key = new Map(), pp = g.attributes.position;
+  for (let i = 0; i < pp.count; i++) {
+    const k = `${pp.getX(i).toFixed(4)},${pp.getY(i).toFixed(4)},${pp.getZ(i).toFixed(4)}`;
+    if (key.has(k)) { const j = key.get(k), nx = nrm.getX(i) + nrm.getX(j), ny = nrm.getY(i) + nrm.getY(j), nz = nrm.getZ(i) + nrm.getZ(j), l = Math.hypot(nx, ny, nz) || 1; nrm.setXYZ(i, nx / l, ny / l, nz / l); nrm.setXYZ(j, nx / l, ny / l, nz / l); }
+    else key.set(k, i);
+  }
+  const T = skinTextures();
+  const skin = new THREE.MeshStandardMaterial({ vertexColors: true, map: T.map, bumpMap: T.bump, bumpScale: 1.1, roughnessMap: T.rough, roughness: 1, metalness: 0, envMap: envTex, envMapIntensity: 0.4 });
+  // light that enters the skin comes back out warm on the shadowed side, a little
+  skin.onBeforeCompile = sh => { sh.fragmentShader = sh.fragmentShader.replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+      reflectedLight.indirectDiffuse += diffuseColor.rgb * vec3(0.055, 0.02, 0.013);`); };
+  const sleeve = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, envMap: envTex, envMapIntensity: 0.2 });
+  const mesh = new THREE.SkinnedMesh(g, [skin, sleeve]);
+  mesh.frustumCulled = false; mesh.castShadow = false; mesh.receiveShadow = false;
+  root.add(mesh); mesh.updateMatrixWorld(true);
+  const sk = new THREE.Skeleton(bones); sk.calculateInverses();
+  mesh.bind(sk, mesh.matrixWorld);
+  // the palm's surface, measured off the mesh: where the hand meets what it holds
+  A.palmT = palmSurf - 0.001;
+  A.contact = contact;
+  return mesh;
+}
+// per frame, after the arm is posed: share the forearm's turn out along it, and fold the elbow and wrist helpers halfway
+const _ahq = new THREE.Quaternion(), _ahq2 = new THREE.Quaternion(), _ahqI = new THREE.Quaternion();
+function poseArmHelpers(A, roll) {
+  if (!A.tw) return;
+  for (const t of A.tw) t.bone.quaternion.setFromAxisAngle(A.handDir, roll * (t.t - FORE_ROLL));
+  A.fore.updateMatrixWorld(true);
+  for (const h of A.halves) {
+    h.P.getWorldQuaternion(_ahq).invert().multiply(h.C.getWorldQuaternion(_ahq2)).multiply(h.R0inv);
+    h.bone.quaternion.copy(_ahqI.identity().slerp(_ahq, 0.5)); h.bone.updateMatrixWorld(true);
+  }
+}
+
+// ---- what the hands can feel: a distance field round each gun, so palms land on it and fingers close round it ----
+// Built once per gun from its own triangles (each moving part separately, so a hand on the slide or pump follows it):
+// surface cells marked, the outside flooded in from the edges, then distances spread out (and in) cell to cell.
+function buildField(meshes, toLocal) {
+  const v = new THREE.Vector3(), M = new THREE.Matrix4(), box = new THREE.Box3(), soups = [];
+  for (const o of meshes) {
+    M.multiplyMatrices(toLocal, o.matrixWorld);
+    const pa = o.geometry.attributes.position, P = new Float32Array(pa.count * 3);
+    for (let i = 0; i < pa.count; i++) { v.fromBufferAttribute(pa, i).applyMatrix4(M); P[i * 3] = v.x; P[i * 3 + 1] = v.y; P[i * 3 + 2] = v.z; box.expandByPoint(v); }
+    soups.push({ P, idx: o.geometry.index ? o.geometry.index.array : null, n: o.geometry.index ? o.geometry.index.count : pa.count });
+  }
+  if (box.isEmpty()) return null;
+  const tA = performance.now();
+  box.expandByScalar(0.03);
+  const sz = box.getSize(new THREE.Vector3()), h = Math.max(0.0025, Math.cbrt(sz.x * sz.y * sz.z / 200000));
+  const nx = Math.ceil(sz.x / h) + 1, ny = Math.ceil(sz.y / h) + 1, nz = Math.ceil(sz.z / h) + 1, N = nx * ny * nz, o0 = box.min;
+  const occ = new Uint8Array(N), id = (i, j, k) => (k * ny + j) * nx + i;
+  const mark = (x, y, z) => { const i = Math.round((x - o0.x) / h), j = Math.round((y - o0.y) / h), k = Math.round((z - o0.z) / h); if (i >= 0 && j >= 0 && k >= 0 && i < nx && j < ny && k < nz) occ[id(i, j, k)] = 1; };
+  for (const s of soups) {
+    const P = s.P, I = s.idx;
+    for (let t = 0; t + 2 < s.n; t += 3) {
+      const a = (I ? I[t] : t) * 3, b = (I ? I[t + 1] : t + 1) * 3, c = (I ? I[t + 2] : t + 2) * 3;
+      const e = Math.max(Math.hypot(P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]), Math.hypot(P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]), Math.hypot(P[c] - P[b], P[c + 1] - P[b + 1], P[c + 2] - P[b + 2]));
+      const n = Math.max(1, Math.ceil(e / (h * 0.6)));
+      for (let i = 0; i <= n; i++) for (let j = 0; i + j <= n; j++) {
+        const u = i / n, w = j / n;
+        mark(P[a] + (P[b] - P[a]) * u + (P[c] - P[a]) * w, P[a + 1] + (P[b + 1] - P[a + 1]) * u + (P[c + 1] - P[a + 1]) * w, P[a + 2] + (P[b + 2] - P[a + 2]) * u + (P[c + 2] - P[a + 2]) * w);
+      }
+    }
+  }
+  const tB = performance.now();
+  // flood the outside in from the box's faces
+  const out = new Uint8Array(N), q = new Int32Array(N); let qh = 0, qt = 0;
+  const seed = (i, j, k) => { const c = id(i, j, k); if (!occ[c] && !out[c]) { out[c] = 1; q[qt++] = c; } };
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) { seed(i, j, 0); seed(i, j, nz - 1); }
+  for (let i = 0; i < nx; i++) for (let k = 0; k < nz; k++) { seed(i, 0, k); seed(i, ny - 1, k); }
+  for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) { seed(0, j, k); seed(nx - 1, j, k); }
+  while (qh < qt) {
+    const c = q[qh++], i = c % nx, j = ((c / nx) | 0) % ny, k = (c / (nx * ny)) | 0;
+    if (i > 0) seed(i - 1, j, k); if (i < nx - 1) seed(i + 1, j, k); if (j > 0) seed(i, j - 1, k); if (j < ny - 1) seed(i, j + 1, k); if (k > 0) seed(i, j, k - 1); if (k < nz - 1) seed(i, j, k + 1);
+  }
+  // hollow parts (a pump, a handguard round its barrel) are open at the ends, so the flood gets inside them
+  const hits = new Uint8Array(N);
+  { const sweep = (n, stride, starts, bit) => { for (const st of starts) { let seen = 0; for (let t = 0; t < n; t++) { const c = st + t * stride; if (occ[c]) seen = bit; else hits[c] |= seen; } seen = 0; for (let t = n - 1; t >= 0; t--) { const c = st + t * stride; if (occ[c]) seen = bit << 1; else hits[c] |= seen; } } };
+    const sx = [], sy = [], sz = [];
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) sx.push((k * ny + j) * nx);
+    for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) sy.push(k * ny * nx + i);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) sz.push(j * nx + i);
+    sweep(nx, 1, sx, 1); sweep(ny, nx, sy, 4); sweep(nz, nx * ny, sz, 16); }
+  // (walled in on both sides and above and below: inside a tube along the barrel. A trigger guard is open at the
+  // sides, so the finger's space inside it stays outside)
+  for (let c = 0; c < N; c++) if ((hits[c] & 15) === 15) out[c] = 0;
+  const tC = performance.now();
+  // distance to the nearest surface cell (two chamfer sweeps), then signed: negative inside
+  const d = new Float32Array(N); for (let c = 0; c < N; c++) d[c] = occ[c] ? 0 : 1e9;
+  // (interior cells only: the box has a 3 cm margin of empty space all round, so its edge cells never matter)
+  const offs = [], wts = [];
+  for (let dk = -1; dk <= 1; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) if (dk < 0 || (dk === 0 && (dj < 0 || (dj === 0 && di < 0)))) { offs.push((dk * ny + dj) * nx + di); wts.push(Math.hypot(di, dj, dk)); }
+  const NB = offs.length;
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) { let c = (k * ny + j) * nx + 1; for (let i = 1; i < nx - 1; i++, c++) { let best = d[c]; if (best === 0) continue; for (let n = 0; n < NB; n++) { const e = d[c + offs[n]] + wts[n]; if (e < best) best = e; } d[c] = best; } }
+  for (let k = nz - 2; k >= 1; k--) for (let j = ny - 2; j >= 1; j--) { let c = (k * ny + j) * nx + nx - 2; for (let i = nx - 2; i >= 1; i--, c--) { let best = d[c]; if (best === 0) continue; for (let n = 0; n < NB; n++) { const e = d[c - offs[n]] + wts[n]; if (e < best) best = e; } d[c] = best; } }
+  for (let c = 0; c < N; c++) if (d[c] > 1e8) d[c] = 60;                       // (edge cells: far)
+  for (let c = 0; c < N; c++) d[c] = occ[c] ? 0 : out[c] ? Math.max(0, d[c] * h - h * 0.5) : -d[c] * h;
+  return { o: o0.clone(), h, nx, ny, nz, d, tm: [tA, tB, tC, performance.now()] };
+}
+function fieldAt(F, x, y, z) {
+  const fx = (x - F.o.x) / F.h, fy = (y - F.o.y) / F.h, fz = (z - F.o.z) / F.h;
+  if (fx < 0 || fy < 0 || fz < 0 || fx >= F.nx - 1 || fy >= F.ny - 1 || fz >= F.nz - 1) return 1;
+  const i = fx | 0, j = fy | 0, k = fz | 0, u = fx - i, v = fy - j, w = fz - k, nx = F.nx, sl = nx * F.ny, c = (k * F.ny + j) * nx + i, D = F.d;
+  const a = D[c] + (D[c + 1] - D[c]) * u, b = D[c + nx] + (D[c + nx + 1] - D[c + nx]) * u, e = D[c + sl] + (D[c + sl + 1] - D[c + sl]) * u, f = D[c + sl + nx] + (D[c + sl + nx + 1] - D[c + sl + nx]) * u;
+  return (a + (b - a) * v) + ((e + (f - e) * v) - (a + (b - a) * v)) * w;
+}
+function buildContact(m) {
+  const t0 = performance.now();
+  m.group.updateMatrixWorld(true);
+  const toLocal = m.group.matrixWorld.clone().invert();
+  const parts = [m.mag, m.slide, m.pump, m.charge].filter(Boolean);
+  const meshesOf = (root, skip) => { const l = []; root.traverse(o => { if (o.isMesh && !(o.isSkinnedMesh) && !skip.some(s => s !== root && isUnder(o, s))) l.push(o); }); return l; };
+  const isUnder = (o, p) => { for (let x = o; x; x = x.parent) if (x === p) return true; return false; };
+  const C = { stat: buildField(meshesOf(m.group, parts), toLocal), parts: [] };
+  for (const p of parts) { const F = buildField(meshesOf(p, []), toLocal); if (F) C.parts.push({ F, obj: p, rest: p.position.clone() }); }
+  C.ms = performance.now() - t0;
+  return C.stat || C.parts.length ? C : null;
+}
+// distance from a point (in the gun's frame) to the gun, moving parts where they are now
+function contactAt(C, p) {
+  let d = C.stat ? fieldAt(C.stat, p.x, p.y, p.z) : 1;
+  for (const q of C.parts) { if (!q.obj.visible) continue; const o = q.obj.position, r = q.rest; d = Math.min(d, fieldAt(q.F, p.x - (o.x - r.x), p.y - (o.y - r.y), p.z - (o.z - r.z))); }
+  return d;
+}
+// the strong hand as capsules (palm and finger segments, world space: ax ay az bx by bz radius), so the support
+// hand's fingers wrap over it instead of through it
+const _caps = [], _hcv = new THREE.Vector3();
+function handCapsules(A) {
+  _caps.length = 0;
+  if (!A || !A.contact) return _caps;
+  const push = (a, b, r) => _caps.push(a.x, a.y, a.z, b.x, b.y, b.z, r);
+  const w = A.hand.getWorldPosition(new THREE.Vector3());
+  for (const fname in A.fingers) {
+    const ch = A.fingers[fname], info = A.contact[fname]; if (!ch.length || !info) continue;
+    const pts = ch.map(j => j.bone.getWorldPosition(new THREE.Vector3()));
+    pts.push(info.tip ? info.tip.getWorldPosition(new THREE.Vector3()) : pts[2].clone().sub(pts[1]).multiplyScalar(0.85).add(pts[2]));
+    if (fname !== 'thumb') push(_hcv.copy(w).lerp(pts[0], 0.3), pts[0], 0.011);           // palm, as a fan from the wrist to each knuckle
+    for (let i = 0; i < 3; i++) push(pts[i], pts[i + 1], info.r);
+  }
+  return _caps;
+}
+// ---- the trigger finger: its pad laid on the trigger's face ----
+// A small search over how far the finger swings up toward the thumb and how much each joint bends, scoring how close
+// the middle of the last segment comes to the trigger point (in the gun's frame) and how far the finger is into the gun.
+const _tq = new THREE.Quaternion(), _tv = new THREE.Vector3(), _tw = new THREE.Vector3(), _tt = new THREE.Vector3();
+function aimTrigger(A, U, mdl) {
+  const ch = A.fingers.index, info = A.contact && A.contact.index;
+  if (!ch || ch.length < 3 || !info) return null;
+  const tgt = _tt.copy(U.trigger).applyMatrix4(mdl.group.matrixWorld), inv = mdl.groupInv, C = mdl.contact;
+  const set = (sp, c1, c2, c3) => {
+    ch[0].bone.quaternion.copy(ch[0].bindQ).multiply(_tq.setFromAxisAngle(ch[0].spread, sp)).multiply(_tq.setFromAxisAngle(ch[0].axis, c1));
+    ch[1].bone.quaternion.copy(ch[1].bindQ).multiply(_tq.setFromAxisAngle(ch[1].axis, c2));
+    ch[2].bone.quaternion.copy(ch[2].bindQ).multiply(_tq.setFromAxisAngle(ch[2].axis, c3));
+    ch[0].bone.updateMatrixWorld(true);
+  };
+  const score = (sp, c1, c2) => {
+    const c3 = c2 * 0.55; set(sp, c1, c2, c3);
+    const J = ch.map(j => j.bone.getWorldPosition(new THREE.Vector3()));
+    const tip = info.tip ? info.tip.getWorldPosition(new THREE.Vector3()) : J[2].clone().sub(J[1]).multiplyScalar(0.85).add(J[2]);
+    const pad = _tv.copy(J[2]).lerp(tip, 0.55);
+    let e = pad.distanceTo(tgt);
+    for (const [a, b] of [[J[0], J[1]], [J[1], J[2]]]) for (const t of [0.5, 1]) { const d = contactAt(C, _tw.copy(a).lerp(b, t).applyMatrix4(inv)) - info.r; if (d < 0) e += -d * 3; }
+    return e;
+  };
+  let best = { e: Infinity };
+  for (let sp = -0.2; sp <= 0.8 + 1e-6; sp += 0.1) for (let c1 = -0.3; c1 <= 0.9 + 1e-6; c1 += 0.15) for (let c2 = 0; c2 <= 1.5 + 1e-6; c2 += 0.15) {
+    const e = score(sp, c1, c2); if (e < best.e) best = { e, sp, c1, c2 };
+  }
+  for (let it = 0; it < 2; it++) { const b = best, st = it ? 0.025 : 0.05;                                            // (and a finer look round the best)
+    for (const sp of [b.sp - st, b.sp, b.sp + st]) for (const c1 of [b.c1 - st * 1.5, b.c1, b.c1 + st * 1.5]) for (const c2 of [b.c2 - st * 1.5, b.c2, b.c2 + st * 1.5]) { const e = score(sp, c1, c2); if (e < best.e) best = { e, sp, c1, c2 }; } }
+  A.aimErr = best.e;
+  return [best.c1, best.c2, best.c2 * 0.55, best.sp];
+}
+// ---- fingers that close on what they hold ----
+// Each finger starts from the hand pose asked for; then, knuckle first, each joint curls in until its own segment
+// meets the gun (or opens until it's out of it), so the finger wraps round whatever shape is there.
+const _fc = { J: [0, 1, 2, 3].map(() => new THREE.Vector3()), X: [0, 1, 2].map(() => new THREE.Vector3()), P: [0, 1, 2, 3].map(() => new THREE.Vector3()), Ax: [0, 1, 2].map(() => new THREE.Vector3()), q: new THREE.Quaternion(), v: new THREE.Vector3(), l: new THREE.Vector3(), qw: new THREE.Quaternion() };
+function closeFingers(A, fresh, mdl, keep, curl, obst) {
+  const C = mdl.contact, inv = mdl.groupInv, F = _fc;
+  A.hand.updateMatrixWorld(true);
+  for (const fname in A.fingers) {
+    const chain = A.fingers[fname], info = A.contact && A.contact[fname];
+    if (!info || chain.length < 3 || (keep && keep.includes(fname))) continue;   // (a trigger finger stays where the grip put it)
+    for (let k = 0; k < 3; k++) { chain[k].bone.getWorldPosition(F.J[k]); F.X[k].copy(chain[k].axis).applyQuaternion(chain[k].bone.getWorldQuaternion(F.qw)).normalize(); }
+    if (info.tip) info.tip.getWorldPosition(F.J[3]); else F.J[3].copy(F.J[2]).sub(F.J[1]).multiplyScalar(0.85).add(F.J[2]);
+    const r = info.r;
+    // how far the finger is into the gun (≥ 0: clear) with its joints turned by d0, d1, d2 beyond the asked-for pose
+    const pen = (d0, d1, d2, from = 0, to = 2) => {
+      for (let i = 0; i < 4; i++) F.P[i].copy(F.J[i]);
+      for (let i = 0; i < 3; i++) F.Ax[i].copy(F.X[i]);
+      const dd = [d0, d1, d2];
+      for (let k = 0; k < 3; k++) {
+        if (!dd[k]) continue;
+        F.q.setFromAxisAngle(F.Ax[k], dd[k]);
+        for (let i = k + 1; i < 4; i++) F.P[i].sub(F.P[k]).applyQuaternion(F.q).add(F.P[k]);
+        for (let i = k + 1; i < 3; i++) F.Ax[i].applyQuaternion(F.q);
+      }
+      let m = 1;
+      for (let s = Math.max(0, from); s <= to; s++) for (const t of s === 2 ? [0.45, 0.8] : [0.4, 0.75, 1]) {
+        F.v.copy(F.P[s]).lerp(F.P[s + 1], t); F.l.copy(F.v).applyMatrix4(inv);
+        let e = contactAt(C, F.l) - r * (s === 2 ? 0.95 : 1);
+        if (obst && fname !== 'thumb') for (let o = 0; o < obst.length; o += 7) {      // (the thumbs lie together along the frame)                           // the other hand, as a set of capsules
+          const ax = obst[o], ay = obst[o + 1], az = obst[o + 2], bx = obst[o + 3] - ax, by = obst[o + 4] - ay, bz = obst[o + 5] - az;
+          const px = F.v.x - ax, py = F.v.y - ay, pz = F.v.z - az, L2 = bx * bx + by * by + bz * bz;
+          const u = L2 > 0 ? Math.min(1, Math.max(0, (px * bx + py * by + pz * bz) / L2)) : 0;
+          const dd = Math.hypot(px - bx * u, py - by * u, pz - bz * u) - obst[o + 6] - r * 0.9;
+          if (dd < e) e = dd;
+        }
+        if (e < m) { m = e; F.worst = s + t; }
+      }
+      return m;
+    };
+    // joint by joint from the knuckle out: from the asked-for angle, curl in until this segment touches, or (if it's
+    // already in the gun) open out until it's clear; a segment with nothing within reach keeps the asked-for angle
+    const lim = 0.0015, d = [0, 0, 0], vals = curl[fname] || [];
+    const solveJoint = k => {
+      const prior = fname === 'thumb' ? (vals[k + 1] ?? 0) : (vals[k] ?? 0);
+      const lo = Math.max(-0.4, -0.2 - prior), hi = Math.min(0.75, 1.8 - prior);   // (it never opens out flat: better a fingertip a little into the gun than a pointing finger)
+      let bestX = 0, bestE = -1;
+      const clear = x => { d[k] = x; const e = pen(d[0], d[1], d[2], k, k); if (e > bestE + 0.002) { bestE = e; bestX = x; } return e >= -lim; };
+      let a = 0;
+      if (clear(0)) {
+        if (fname === 'thumb') { d[k] = 0; return; }                                  // (a thumb that's clear lies as it was put)
+        let hit = false;
+        for (let x = 0.05; x <= hi + 1e-6; x += 0.05) { if (!clear(x)) { hit = true; let l = x - 0.05, h = x; for (let i = 0; i < 3; i++) { const m = (l + h) / 2; if (clear(m)) l = m; else h = m; } a = l; break; } }
+        if (!hit) a = 0;
+      } else {                                                                          // in the gun: the nearest clear angle, wrapping tighter or opening out
+        a = NaN;
+        for (let x = 0.05; x <= 0.75; x += 0.05) { if (x <= hi + 1e-6 && clear(x)) { a = x; break; } if (-x >= lo - 1e-6 && clear(-x)) { a = -x; break; } }
+        if (isNaN(a)) a = bestX;                                                        // (nowhere clear: the least deep)
+      }
+      d[k] = a;
+    };
+    for (let k = 0; k < 3; k++) solveJoint(k);
+    // a joint that had to open right out means the one before it closed too far (the knuckle hard up against the corner,
+    // nowhere left for the rest of the finger to go): back that one off and wrap the rest again
+    for (let it = 0; it < 3; it++) {
+      let k = 1; while (k < 3 && d[k] > -0.12) k++;
+      if (k === 3) break;
+      d[k - 1] -= 0.25; d[k] = 0; if (k < 2) d[2] = 0;
+      for (let j = k; j < 3; j++) solveJoint(j);
+    }
+    chain.dbg = d.slice();
+    // ease toward it (a fresh grip snaps)
+    if (!chain.dq || fresh) chain.dq = d.slice();
+    else for (let k = 0; k < 3; k++) chain.dq[k] += (d[k] - chain.dq[k]) * 0.45;
+    for (let k = 0; k < 3; k++) if (chain.dq[k]) chain[k].bone.quaternion.multiply(F.q.setFromAxisAngle(chain[k].axis, chain.dq[k]));
+    chain[0].bone.updateMatrixWorld(true);
+  }
+}
 function buildArms(gltf) {
-  // your own character's arms when it's loaded (gloves and jacket sleeves), else the stock soldier's
+  // the bones of your own character's arms when it's loaded, else the stock soldier's
   const useChar = !!CHAR;
   const root = useChar ? charClone() : gltf.scene;
   let B = {}, mixer = null;
@@ -4833,25 +5704,8 @@ function buildArms(gltf) {
   const fwd = new THREE.Vector3().crossVectors(U3, right);
   root.rotation.y += Math.atan2(fwd.x, fwd.z) - Math.PI;
   root.updateMatrixWorld(true);
-  // keep only the arms and hands
-  const skins = [];
-  root.traverse(o => { if (o.isSkinnedMesh) { if (/visor/i.test(o.name) || (useChar && HEAD_MATS.test(o.material.name))) o.visible = false; else skins.push(o); o.frustumCulled = false; o.castShadow = false; } });
-  const armBone = useChar ? /^(upperarm|lowerarm|hand|thumb|index|middle|ring|pinky|wrist|weapon)_|(Left|Right)(Arm|ForeArm|Hand)/ : /(Left|Right)(Arm|ForeArm|Hand)/;
-  for (const skinned of skins) {
-    skinned.geometry = skinned.geometry.clone();                     // the body and the rider share this geometry
-    const geo = skinned.geometry, idx = geo.index.array, si = geo.attributes.skinIndex, sw = geo.attributes.skinWeight;
-    const keep = skinned.skeleton.bones.map(b => armBone.test(b.name));
-    const comp = (attr, v, k) => k === 0 ? attr.getX(v) : k === 1 ? attr.getY(v) : k === 2 ? attr.getZ(v) : attr.getW(v);
-    const ok = v => { let armW = 0; for (let k = 0; k < 4; k++) if (keep[comp(si, v, k)]) armW += comp(sw, v, k); return armW > 0.8; };
-    const vOk = new Uint8Array(geo.attributes.position.count);
-    for (let v = 0; v < vOk.length; v++) vOk[v] = ok(v) ? 1 : 0;
-    const out = [];
-    for (let i = 0; i < idx.length; i += 3) if (vOk[idx[i]] && vOk[idx[i + 1]] && vOk[idx[i + 2]]) out.push(idx[i], idx[i + 1], idx[i + 2]);
-    geo.setIndex(out);
-    if (!out.length) skinned.visible = false;
-    skinned.material = skinned.material.clone(); skinned.material.envMap = envTex; skinned.material.envMapIntensity = useChar ? 0.55 : 0.35;
-    if (useChar && out.length) slimArms(skinned, ARM_SLIM);
-  }
+  // the rig's own meshes stay hidden: it only lends its bones to the bare arms built below
+  root.traverse(o => { if (o.isMesh) { o.visible = false; o.castShadow = false; } });
   const arms = { root, B, mixer };
   for (const [S, nm] of [['R', 'Right'], ['L', 'Left']]) {
     const arm = B[nm + 'Arm'], fore = B[nm + 'ForeArm'], hand = B[nm + 'Hand'];
@@ -4899,6 +5753,7 @@ function buildArms(gltf) {
   root.position.add(arms.anchor.R.clone().add(arms.anchor.L).multiplyScalar(0.5).sub(mid));
   root.updateMatrixWorld(true);
   for (const S of ['R', 'L']) { const sh = arms[S].arm.parent; arms[S].sh = sh; arms[S].shBind = sh.position.clone(); }
+  arms.skin = [['R', 'Right'], ['L', 'Left']].map(([S, nm]) => buildSkinArm(B, nm, root, arms[S]));
   arms.pole = { R: new THREE.Vector3(0.75, -0.65, 0.15).normalize(), L: new THREE.Vector3(-0.7, -0.7, 0.05).normalize() };
   ARMS = arms;
 }
@@ -5056,12 +5911,21 @@ function armCost(A, U, phi, spin, roll) {
   return (roll / 1.3) ** 2 + (bend / 0.75) ** 2 + 0.3 * (phi / 1.6) ** 2 + (up / 0.07) ** 2 + (inView / 0.15) ** 2
     + (U.axis ? 0.25 * (spin / (U.spinW || 0.6)) ** 2 : 0) + 0.3 * (wrapPi(phi - A.phi) / 1.0) ** 2;
 }
+const _snN = new THREE.Vector3(), _snP = new THREE.Vector3();
 const FORE_ROLL = 0.6;                         // share of the palm's turn carried by the forearm (the wrist takes the rest)
 function poseArm(S, marker) {
   const A = ARMS[S], U = marker.userData, T = _pa;
   A.side = S;
   marker.getWorldPosition(T.P0); marker.getWorldQuaternion(T.mq);
   const fresh = A.lastMarker !== marker; A.lastMarker = marker;
+  // the palm comes down onto the gun's surface where the grip is (the marker says where; the gun's own shape says how far)
+  const mdl = ARMS.mdl;
+  if (mdl && mdl.contact) {
+    const nW = _snN.copy(U.n).applyQuaternion(T.mq).normalize(); let sh = 0;
+    for (let i = 0; i < 3; i++) { const d = contactAt(mdl.contact, _snP.copy(T.P0).addScaledVector(nW, sh).applyMatrix4(mdl.groupInv)); if (d > 0.03 && i === 0) break; sh = clamp(sh + d - 0.0008, -0.012, 0.015); }
+    T.P0.addScaledVector(nW, sh);
+    A.snap = sh;
+  }
   if (fresh) { A.spin = 0; A.phi = 0; }
   // search: the elbow all round its circle, and the hand a little either way round its grip
   const lim = U.spinLim || [0, 0];
@@ -5086,11 +5950,13 @@ function poseArm(S, marker) {
   setWorld(A.arm, T.aw);
   setWorld(A.fore, T.qh.premultiply(_qb.setFromAxisAngle(T.foreD, roll * FORE_ROLL)));
   setWorld(A.hand, frameQ(T.f, T.n).multiply(A.handF0).multiply(A.handQ0));
+  poseArmHelpers(A, roll);
   A.dbg = { roll: roll * 180 / Math.PI, bend: Math.acos(clamp(T.foreD.dot(T.f), -1, 1)) * 180 / Math.PI, elbow: T.E.clone(), phi: A.phi * 180 / Math.PI, spin: A.spin * 180 / Math.PI };
   // fingers
   const c = U.curl;
+  if (U.trigger && mdl && mdl.contact && (fresh || !A.aim || A.aimMarker !== marker || ++A.aimT > 30)) { A.hand.updateMatrixWorld(true); A.aim = aimTrigger(A, U, mdl); A.aimMarker = marker; A.aimT = 0; }
   for (const fname in A.fingers) {
-    const chain = A.fingers[fname], vals = c[fname];
+    const chain = A.fingers[fname], vals = fname === 'index' && U.trigger && A.aim ? A.aim : c[fname];
     chain.forEach((j, k) => {
       j.bone.quaternion.copy(j.bindQ);
       if (fname === 'thumb' && k === 0) j.bone.quaternion.multiply(_qb.setFromAxisAngle(j.oppose, vals[0]));
@@ -5099,6 +5965,7 @@ function poseArm(S, marker) {
       j.bone.quaternion.multiply(_qb.setFromAxisAngle(j.axis, ang));
     });
   }
+  if (mdl && mdl.contact && !U.free) closeFingers(A, fresh, mdl, U.keep, U.curl, S === 'L' ? handCapsules(ARMS.R) : null);
 }
 function solveArms(mdl) {
   if (!ARMS) return;
@@ -5106,6 +5973,9 @@ function solveArms(mdl) {
   if (!mdl.group.visible) return;
   ARMS.root.updateMatrixWorld(true);
   mdl.group.updateMatrixWorld(true);
+  if (mdl.contact === undefined) mdl.contact = buildContact(mdl);                 // (once per gun, the first time it's drawn)
+  mdl.groupInv = (mdl.groupInv || new THREE.Matrix4()).copy(mdl.group.matrixWorld).invert();
+  ARMS.mdl = mdl;
   for (const S of ['R', 'L']) ARMS.anchor[S].lerpVectors(ARMS.anchorHip[S], (S === 'R' && mdl.adsShoulderR) || ARMS.anchorAds[S], vm.ads);   // (a shotgun's wrist sits high, so its elbow hangs low)
   poseArm('R', mdl.R);
   poseArm('L', mdl.L);
@@ -5115,13 +5985,18 @@ function solveArms(mdl) {
 const WEAPONS = {
   // M4A1: 700–970 rounds a minute on full auto (a shot every ~75 ms), a soft straight-back push (≈6 J of recoil)
   1: { name: 'M4A1', key: 'rifle', auto: true, rate: 0.075, mag: 30, dmg: 1, push: 1, spread: 0.014, adsSpread: 0.0025, kick: 0.011, reload: 2.0, snd: 'rifle',
-    back: 0.032, rise: 0.05, flash: 0.028, flashSize: 0.1, light: 5, brass: 'rifle', lockBack: true },
+    back: 0.032, rise: 0.05, flash: 0.028, flashSize: 0.1, light: 5, brass: 'rifle', lockBack: true,
+    // shouldered: the rifle shoves straight back and climbs a little, settled in ~0.15 s; a puff of smoke hangs at the muzzle
+    rec: { back: 0.028, bw: 36, rise: 0.045, rw: 21, rz: 0.72, side: 0.008, roll: 0.012 }, smoke: 0.9, cycle: 0.06 },
   // Glock 17: 17 rounds; a sharp upward flip as the slide slams back (≈8 J); the slide stays back on the last round
   2: { name: 'Glock 17', key: 'pistol', auto: false, rate: 0.15, mag: 17, dmg: 0.8, push: 0.75, spread: 0.012, adsSpread: 0.003, kick: 0.02, reload: 1.5, snd: 'pistol',
-    back: 0.02, rise: 0.17, flash: 0.032, flashSize: 0.13, light: 4, brass: 'pistol', lockBack: true },
+    back: 0.02, rise: 0.17, flash: 0.032, flashSize: 0.13, light: 4, brass: 'pistol', lockBack: true,
+    // filmed: the slide is back in a frame, the muzzle flips up and a little right, peaks ~80 ms, is back on target by ~200 ms
+    rec: { back: 0.03, bw: 40, rise: 0.21, rw: 15, rz: 0.6, side: 0.035, roll: 0.06 }, smoke: 0.45, cycle: 0.045 },
   // 12 gauge pump (Ithaca 37 riot): 4 in the tube + 1 in the chamber; four to five times the kick of the others (≈30 J); empties drop out the bottom
   3: { name: '12 Gauge', key: 'shotgun', auto: false, rate: 0.85, mag: 5, dmg: 0.42, push: 0.55, spread: 0.065, adsSpread: 0.05, kick: 0.05, reload: 0.5, pellets: 9, pellet: true, snd: 'shotgun',
-    back: 0.085, rise: 0.22, flash: 0.04, flashSize: 0.17, light: 7, brass: 'hull' },
+    back: 0.085, rise: 0.22, flash: 0.04, flashSize: 0.17, light: 7, brass: 'hull',
+    rec: { back: 0.085, bw: 26, rise: 0.25, rw: 11, rz: 0.55, side: 0.02, roll: 0.03 }, smoke: 1.2 },
   4: { name: 'Grab', key: 'grab' },
   5: { name: 'Grenade', key: 'grenade' },
 };
@@ -5145,25 +6020,31 @@ const GUN_SPECS = {
   1: { // M4A1 carbine ("Modern Warefare M4A1", Nneako): flat-top, flip-up irons, PMAG, real centimetres
     // measured: bore 18 mm up, rear aperture centre 81 mm up at 44 mm behind the trigger guard, grip raked ~27°
     flip: true, s: 1, o: [0, 0.002, 0.077],
-    R: [[0.015, -0.052, 0.139], [0, -0.447, -0.894], [-1, 0, 0], { base: 'trigger', index: [-0.2, 0.25, 0.65, 0.6] }, { axis: [0, -0.894, 0.447], r: 0.015, spinLim: [-0.12, 0.12] }],
-    L: [[-0.0216, -0.006, -0.2], [0.35, 0.25, -0.9], [0.6, 0.8, 0], 'under', { axis: [0, 0, 1], r: 0.036, spinLim: [-0.8, 0.8], spinW: 0.8 }],
+    R: [[0.015, -0.052, 0.139], [0, -0.447, -0.894], [-1, 0, 0], { base: 'trigger', index: [-0.2, 0.25, 0.65, 0.6] }, { axis: [0, -0.894, 0.447], r: 0.015, spinLim: [-0.12, 0.12], keep: ['index'] }],
+    // support hand: palm on the lower left of the handguard, fingers wrapping under it and up the right side, thumb forward along the left
+    L: [[-0.0216, -0.006, -0.15], [0.6, -0.6, -0.5], [0.7, 0.7, 0], { base: 'under', thumb: [-0.1, 0.35, 0.25] }, { axis: [0, 0, 1], r: 0.036, spinLim: [-0.8, 0.8], spinW: 0.8 }],
     sight: [0, 0.0827, 0.121], eye: 0.25, muzzle: [0, 0.0202, -0.363], hip: [0.13, -0.15, -0.37], hipRot: [0.02, 0.05, -0.06], magTarget: [-0.01, -0.2, 0.0],
     mag: ['magazine_Material', 'magazine_follower', 'magazine_round'], slide: ['bolt_Material'], slideBack: 0.085,
+    charge: ['charging_handle'], rack: { at: [-0.012, 0.062, 0.152], f: [1, -0.25, 0.1], n: [0.1, -1, 0.25], pull: 0.075 },
     // the model's own 5.56 round and spent case: one sits on top of the magazine, the cases are what flies out of the port
     round: 'bullet_Material', brassMesh: 'bullet_caseing', roundAt: [-0.003, 0.0058, 0.057], follower: 'magazine_follower',
     port: ['ejection_port'], portHinge: [0.0205, 0.0167], brassPort: [0.024, 0.012, 0.03],
   },
   2: { // Glock 17 Gen 5 with an Olight (8sianDude)
     flip: true, s: 0.11178, o: [0, -0.0866, -0.0121],
-    R: [[0.015, -0.019, 0.089], [0, -0.39, -0.92], [-1, 0, 0], { base: 'trigger', index: [-0.2, 0.3, 0.65, 0.5] }, { axis: [0, -0.92, 0.39], r: 0.016, spinLim: [-0.12, 0.12] }],
-    L: [[-0.02, -0.048, 0.052], [0.05, -0.42, -0.9], [1, 0, 0.05], 'support', { axis: [0, -0.93, 0.37], r: 0.03, spinLim: [-0.35, 0.35] }],
+    // a tight two-hand grip (as in the range clip and police bodycam footage): wrists in line with the forearms, the strong
+    // hand high on the grip with its web round the backstrap, the support hand canted down over its fingers, the strong
+    // thumb along the left of the frame above the support thumb
+    R: [[0.02, -0.006, 0.052], [-0.25, -0.55, -0.8], [-1, 0.2, 0.3], { base: 'trigger', index: [0.3, 0.5, 0.3, 0.45], thumb: [0.2, -0.4, -0.1] }, { axis: [0, -0.92, 0.39], r: 0.012, spinLim: [-0.12, 0.12], keep: ['index'], trigger: [0, 0.0, -0.018] }],
+    L: [[-0.016, -0.048, 0.05], [0.45, -0.65, -0.6], [1, 0.2, 0.3], { base: 'support', thumb: [-0.4, 0.2, 0.1] }, { axis: [0, -0.93, 0.37], r: 0.024, spinLim: [-0.35, 0.35] }],
     sight: [0, 0.0507, 0.0628], eye: 0.56, muzzle: [0, 0.033, -0.1073], hip: [0.09, -0.12, -0.38], hipRot: [0.02, 0.06, -0.06], magTarget: [-0.01, -0.15, 0.06],
-    mag: ['mag_full'], slide: ['slide'],
+    mag: ['mag_full'], slide: ['slide'], slideBack: 0.034,
+    rack: { at: [-0.003, 0.056, 0.05], f: [1, -0.25, 0], n: [0, -1, 0], pull: 0.055 },
   },
   3: { // Ithaca Model 37 riot, 12 gauge (8sianDude)
     flip: false, s: 0.116, o: [0, -0.0497, -0.0546],
-    R: [[0.022, -0.008, 0.196], [0, -0.7, -0.7], [-1, 0, 0], { base: 'trigger', index: [-0.2, 0.5, 0.2, 0.5] }, { axis: [0, -0.7, 0.7], r: 0.022, spinLim: [-0.12, 0.12] }],
-    L: [[-0.012, -0.027, -0.26], [0.35, 0.25, -0.9], [0.6, 0.8, 0], 'under', { axis: [0, 0, 1], r: 0.027, spinLim: [-0.8, 0.8], spinW: 0.8 }],
+    R: [[0.022, -0.008, 0.196], [0, -0.7, -0.7], [-1, 0, 0], { base: 'trigger', index: [-0.2, 0.5, 0.2, 0.5] }, { axis: [0, -0.7, 0.7], r: 0.022, spinLim: [-0.12, 0.12], keep: ['index'] }],
+    L: [[-0.012, -0.027, -0.24], [0.6, -0.6, -0.5], [0.7, 0.7, 0], { base: 'under', thumb: [-0.1, 0.35, 0.25] }, { axis: [0, 0, 1], r: 0.027, spinLim: [-0.8, 0.8], spinW: 0.8 }],
     sight: [0, 0.058, 0.0904], eye: 0.36, adsOff: [0.004, -0.028, 0], adsShoulderR: [0.17, -0.32, 0.08], muzzle: [0, 0.026, -0.515], hip: [0.13, -0.16, -0.4], hipRot: [0.02, 0.05, -0.06], shellTarget: [0.005, -0.03, 0.025],
     pump: ['Pump'],
   },
@@ -5196,7 +6077,7 @@ function gunFromGlb(gltf, sp) {
   inner.traverse(o => { if (o.isMesh) { o.castShadow = o.receiveShadow = false; const ms = Array.isArray(o.material) ? o.material : [o.material]; for (const m of ms) m.envMapIntensity = 0.9; } });
   // moving parts get their own holder in the gun's frame, so they slide in real centimetres
   const part = names => { const w = new THREE.Group(); g.add(w); const list = []; inner.traverse(o => { if (o.isMesh && names.some(n => o.name.includes(n))) list.push(o); }); for (const o of list) w.attach(o); return w; };
-  const curlOf = c => typeof c === 'string' ? CURL[c] : { ...CURL[c.base], ...c };     // a stock hand pose, or one with a finger or two set for this gun
+  const curlOf = c => { if (typeof c === 'string') return CURL[c]; const { base, ...own } = c; return { ...CURL[base], ...own }; };     // a stock hand pose, or one with a finger or two set for this gun
   const m = { group: g, R: gripMarker(g, ...sp.R.slice(0, 3), curlOf(sp.R[3]), sp.R[4]), L: gripMarker(g, ...sp.L.slice(0, 3), curlOf(sp.L[3]), sp.L[4]),
     sight: V(sp.sight), eye: sp.eye, muzzle: V(sp.muzzle), hip: V(sp.hip), hipRot: sp.hipRot, real: true,
     adsShoulderR: sp.adsShoulderR && V(sp.adsShoulderR), adsOff: sp.adsOff && V(sp.adsOff) };
@@ -5207,6 +6088,13 @@ function gunFromGlb(gltf, sp) {
   if (sp.slide) m.slide = part(sp.slide);
   if (sp.pump) { m.pump = part(sp.pump); m.pumpHome = m.pump.position.clone(); }
   if (sp.slideBack) m.slideBack = sp.slideBack;
+  if (sp.charge) m.charge = part(sp.charge);
+  if (sp.rack) {                                       // the support hand's grip for racking: where, and the turn of the hand that puts it there
+    const L = m.L.userData, f0 = L.f.clone(), n0 = L.n.clone().addScaledVector(L.f, -L.n.dot(L.f)).normalize();
+    const f1 = V(sp.rack.f).normalize(), n1 = V(sp.rack.n).addScaledVector(f1, -V(sp.rack.n).dot(f1)).normalize();
+    const B0 = new THREE.Matrix4().makeBasis(f0, n0, f0.clone().cross(n0)), B1 = new THREE.Matrix4().makeBasis(f1, n1, f1.clone().cross(n1));
+    m.rack = { at: V(sp.rack.at), pull: sp.rack.pull, q: new THREE.Quaternion().setFromRotationMatrix(B1.multiply(B0.transpose())), curl0: L.curl };
+  }
   if (sp.port) {                                     // the dust cover (modelled hanging open): flipped up shut until the first shot pops it open
     const w = new THREE.Group(); w.position.set(sp.portHinge[0], sp.portHinge[1], 0); g.add(w);
     const list = []; inner.traverse(o => { if (o.isMesh && sp.port.some(n => o.name.includes(n))) list.push(o); }); for (const o of list) w.attach(o);
@@ -5223,6 +6111,7 @@ function installGun(k, gltf) {
     models[k] = m; registerModel(k);
     m.group.visible = old.group.visible;
     if (vm.reload && vm.w === Number(k)) vm.reload = null;
+    setTimeout(() => { if (models[k] === m && m.contact === undefined) m.contact = buildContact(m); }, 30 + 60 * Number(k));   // (the hands' feel for it, built ahead of being drawn)
   } catch (e) { console.warn('kept the drawn gun', k, e); }
 }
 const ammo = { 1: 30, 2: 17, 3: 5 };
@@ -5232,7 +6121,7 @@ const BRASS = [];
 const brassMat = new THREE.MeshStandardMaterial({ color: '#c9a04a', roughness: 0.32, metalness: 0.95 });
 const hullMat = new THREE.MeshStandardMaterial({ color: '#8f1d18', roughness: 0.55 });
 const BRASS_KIND = {
-  rifle: { geo: new THREE.CylinderGeometry(0.0048, 0.0048, 0.045, 10), mat: brassMat, r: 0.005, port: [0.016, 0.022, 0.0], v: [1.6, 0.9, 0.05], snd: 'tink' },
+  rifle: { geo: new THREE.CylinderGeometry(0.0048, 0.0048, 0.045, 10), mat: brassMat, r: 0.005, port: [0.016, 0.022, 0.0], v: [1.7, 0.75, -0.4], snd: 'tink' },
   pistol: { geo: new THREE.CylinderGeometry(0.005, 0.005, 0.019, 10), mat: brassMat, r: 0.005, port: [0.013, 0.04, 0.01], v: [1.5, 1.9, 0.3], snd: 'tink' },
   hull: { geo: new THREE.CylinderGeometry(0.0105, 0.0105, 0.07, 12), mat: hullMat, r: 0.0105, port: [0, -0.035, -0.02], v: [0.15, -0.6, 0.1], snd: 'hull' },
 };
@@ -5268,7 +6157,9 @@ function updateBrass(dt) {
     if (b.v.y === 0) { b.v.x *= Math.exp(-dt * 4); b.v.z *= Math.exp(-dt * 4); b.m.rotation.x = Math.PI / 2; }    // rolls to a stop on its side
   }
 }
-const vm = { w: 1, raise: 1, switchTo: 0, ads: 0, kick: 0, kickRot: 0, swayX: 0, swayY: 0, reload: null, pump: 0, throwT: 0, flashT: 0, bob: 0 };
+// a damped spring shoved from rest peaks at v/ω·(this): the kick that gives a wanted peak is peak·ω·springK(ζ)
+function springK(z) { const wd = Math.sqrt(1 - z * z), tp = Math.atan2(wd, z) / wd; return 1 / (Math.exp(-z * tp) * Math.sin(wd * tp) / wd); }
+const vm = { rb: 0, rbv: 0, rr: 0, rrv: 0, rs: 0, rsv: 0, rl: 0, rlv: 0, w: 1, raise: 1, switchTo: 0, ads: 0, kick: 0, kickRot: 0, swayX: 0, swayY: 0, reload: null, pump: 0, throwT: 0, flashT: 0, bob: 0 };
 
 // ================= player =================
 const player = { pos: new THREE.Vector3(6, 0, 14), vel: new THREE.Vector3(), yaw: 0.55, pitch: -0.08, onGround: true };
@@ -5831,6 +6722,11 @@ function maintainCrowd(dt) {
 const ray = new CANNON.RaycastResult();
 const RAY_MASK = -1 ^ GRP.PLAYER ^ GRP.GRENADE;
 const rcMesh = new THREE.Raycaster();
+function aimDir(spread = 0) {
+  const dir = v3(); camera.getWorldDirection(dir);
+  if (spread) { dir.x += (Math.random() - 0.5) * spread; dir.y += (Math.random() - 0.5) * spread; dir.z += (Math.random() - 0.5) * spread; dir.normalize(); }
+  return { dir, from: camera.position.clone() };
+}
 function aimRay(spread = 0) {
   const dir = v3(); camera.getWorldDirection(dir);
   if (spread) { dir.x += (Math.random() - 0.5) * spread; dir.y += (Math.random() - 0.5) * spread; dir.z += (Math.random() - 0.5) * spread; dir.normalize(); }
@@ -5841,6 +6737,141 @@ function aimRay(spread = 0) {
 }
 const crossEl = document.getElementById('cross');
 let crossT = 0;
+// ---- bullets against the skin you can see ----
+// The physics capsules are only roughly body-shaped, so a bullet is traced against the posed mannequin itself: only the
+// parts near the line are posed (their triangles are grouped by the bone that carries them), every crossing of the skin is
+// found, and the body becomes a set of segments the bullet passes through. Each round can push through so much tissue
+// (a rifle round through a chest, a pistol round through a limb and often the body, buckshot rarely all the way); what it
+// gets through it leaves by an exit wound and carries on to whatever is behind.
+const PEN = { rifle: 0.9, pistol: 0.5, shotgun: 0.16 };
+let SKIN = null, SKIN_STAMP = 1;
+const _sv = new THREE.Vector3(), _sA = new THREE.Vector3(), _sB = new THREE.Vector3(), _sM = new THREE.Matrix4();
+function skinSetup(d) {
+  if (SKIN) return SKIN;
+  const byName = {}; d.parts.forEach((p, i) => { byName[p.bone.name] = i; });
+  SKIN = d.meshes.map(m => {
+    const bp = m.skeleton.bones.map(b => { let o = b; while (o && byName[o.name] === undefined) o = o.parent; return o ? byName[o.name] : 0; });
+    const g = m.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, ix = g.index ? g.index.array : null;
+    const nt = (ix ? ix.length : g.attributes.position.count) / 3, vPart = new Int8Array(si.count);
+    const comp = (a, v, k) => k === 0 ? a.getX(v) : k === 1 ? a.getY(v) : k === 2 ? a.getZ(v) : a.getW(v);
+    for (let v = 0; v < si.count; v++) { let best = 0, bw = -1; for (let k = 0; k < 4; k++) { const w = comp(sw, v, k); if (w > bw) { bw = w; best = comp(si, v, k); } } vPart[v] = bp[best]; }
+    // (triangles grouped by the bone that carries them, each group with a bounding sphere in that bone's frame)
+    const vBone = new Int16Array(si.count);
+    for (let v = 0; v < si.count; v++) { let best = 0, bw = -1; for (let k = 0; k < 4; k++) { const w = comp(sw, v, k); if (w > bw) { bw = w; best = comp(si, v, k); } } vBone[v] = best; }
+    const G = new Map();
+    for (let t = 0; t < nt; t++) { const a = ix ? ix[t * 3] : t * 3, b = ix ? ix[t * 3 + 1] : t * 3 + 1, c = ix ? ix[t * 3 + 2] : t * 3 + 2, bi = vBone[a];
+      let g = G.get(bi); if (!g) G.set(bi, g = { bone: bi, part: bp[bi], tris: [], verts: new Set() }); g.tris.push(a, b, c); g.verts.add(a).add(b).add(c); }
+    const pos = g.attributes.position, v = new THREE.Vector3(), groups = [];
+    for (const g of G.values()) {
+      const vs = Uint32Array.from(g.verts), cen = new THREE.Vector3();
+      for (const i of vs) cen.add(v.fromBufferAttribute(pos, i)); cen.divideScalar(vs.length);
+      let r = 0; for (const i of vs) r = Math.max(r, v.fromBufferAttribute(pos, i).distanceTo(cen));
+      const toBone = new THREE.Matrix4().multiplyMatrices(m.skeleton.boneInverses[g.bone], m.bindMatrix);
+      groups.push({ bone: g.bone, part: g.part, tris: Uint32Array.from(g.tris), verts: vs, c: cen.applyMatrix4(toBone), r: r + 0.03 });
+    }
+    return { groups };
+  });
+  return SKIN;
+}
+const PART_R = { pelvis: 0.2, abdomen: 0.2, chest: 0.24, head: 0.16, uarmL: 0.1, uarmR: 0.1, farmL: 0.1, farmR: 0.1, thighL: 0.13, thighR: 0.13, shinL: 0.1, shinR: 0.1, footL: 0.12, footR: 0.12 };
+// distance between a ray (o + t·d, t ≥ 0) and a segment a–b
+function raySegDist(o, d, a, b) {
+  const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, wx = o.x - a.x, wy = o.y - a.y, wz = o.z - a.z;
+  const A = ux * ux + uy * uy + uz * uz, Bd = ux * d.x + uy * d.y + uz * d.z, D = ux * wx + uy * wy + uz * wz, E = d.x * wx + d.y * wy + d.z * wz;
+  const den = A - Bd * Bd; let s = den > 1e-9 ? clamp((D - Bd * E) / den, 0, 1) : 0, t = Bd * s - E;
+  if (t < 0) { t = 0; s = clamp(D / A, 0, 1); }
+  const px = a.x + ux * s - (o.x + d.x * t), py = a.y + uy * s - (o.y + d.y * t), pz = a.z + uz * s - (o.z + d.z * t);
+  return Math.sqrt(px * px + py * py + pz * pz);
+}
+// every place the line crosses this dummy's skin, grouped into the stretches it spends inside
+function skinSegments(d, from, dir, maxT, out) {
+  const S = skinSetup(d);
+  if (!d._sk) d._sk = d.meshes.map(m => ({ pos: new Float32Array(m.geometry.attributes.position.count * 3), st: new Int32Array(m.geometry.attributes.position.count) }));
+  const hits = [];
+  d.meshes.forEach((m, mi) => {
+    const C = d._sk[mi], tr = S[mi], mw = m.matrixWorld;
+    const P = v => { if (C.st[v] !== SKIN_STAMP) { m.getVertexPosition(v, _sv).applyMatrix4(mw); C.pos[v * 3] = _sv.x; C.pos[v * 3 + 1] = _sv.y; C.pos[v * 3 + 2] = _sv.z; C.st[v] = SKIN_STAMP; } return v * 3; };
+    const pos = C.pos;
+    _sM.multiplyMatrices(mw, m.bindMatrixInverse);
+    for (const grp of tr.groups) {
+      // only the bits of skin the line passes near: the group's sphere, carried by its bone
+      _sA.copy(grp.c).applyMatrix4(m.skeleton.bones[grp.bone].matrixWorld).applyMatrix4(_sM).sub(from);
+      const along = _sA.dot(dir); if (along < -grp.r || along > maxT + grp.r) continue;
+      if (_sA.lengthSq() - along * along > grp.r * grp.r) continue;
+      const T3 = grp.tris, pi = grp.part;
+      for (const v of grp.verts) P(v);
+      for (let k = 0; k < T3.length; k += 3) {
+        const a = T3[k] * 3, b = T3[k + 1] * 3, c = T3[k + 2] * 3;
+        // Möller–Trumbore
+        const e1x = pos[b] - pos[a], e1y = pos[b + 1] - pos[a + 1], e1z = pos[b + 2] - pos[a + 2];
+        const e2x = pos[c] - pos[a], e2y = pos[c + 1] - pos[a + 1], e2z = pos[c + 2] - pos[a + 2];
+        const px = dir.y * e2z - dir.z * e2y, py = dir.z * e2x - dir.x * e2z, pz = dir.x * e2y - dir.y * e2x;
+        const det = e1x * px + e1y * py + e1z * pz; if (Math.abs(det) < 1e-10) continue;
+        const inv = 1 / det, tx = from.x - pos[a], ty = from.y - pos[a + 1], tz = from.z - pos[a + 2];
+        const u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) continue;
+        const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+        const w = (dir.x * qx + dir.y * qy + dir.z * qz) * inv; if (w < 0 || u + w > 1) continue;
+        const t = (e2x * qx + e2y * qy + e2z * qz) * inv; if (t <= 0 || t > maxT) continue;
+        const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x, nl = Math.hypot(nx, ny, nz) || 1;
+        hits.push({ t, n: new THREE.Vector3(nx / nl, ny / nl, nz / nl), part: pi });
+      }
+    }
+  });
+  if (!hits.length) return;
+  hits.sort((x, y) => x.t - y.t);
+  // in through the skin, out through it again (the joints are separate shells overlapping the surface: count the layers)
+  let depth = 0, inn = null, last = null;
+  for (const h of hits) {
+    const front = h.n.x * dir.x + h.n.y * dir.y + h.n.z * dir.z < 0;
+    if (front) { if (depth === 0) inn = h; depth++; }
+    else { last = h; depth = Math.max(0, depth - 1); if (depth === 0 && inn) { out.push({ d, t0: inn.t, n0: inn.n, p0: inn.part, t1: h.t, n1: h.n, p1: h.part }); inn = null; } }
+  }
+  if (inn) out.push({ d, t0: inn.t, n0: inn.n, p0: inn.part, t1: last && last.t > inn.t ? last.t : null, n1: last ? last.n : null, p1: last ? last.part : inn.part });
+}
+// one bullet (or pellet): returns where it ended up
+function shootBullet(from, dir, W) {
+  const far = from.clone().addScaledVector(dir, 150);
+  // the first solid thing in the way that isn't a body
+  let wt = 150, wb = null, wp = null, wn = null;
+  world.raycastAll(toC(from), toC(far), { skipBackfaces: true, collisionFilterMask: RAY_MASK }, res => {
+    const ud = res.body.userData || {}; if (ud.kind === 'dummy') return;
+    if (res.distance < wt) { wt = res.distance; wb = res.body; wp = fromC(res.hitPointWorld); wn = fromC(res.hitNormalWorld); }
+  });
+  SKIN_STAMP++;
+  const segs = [];
+  for (const d of dummies) {
+    const pel = d.parts[0].body.position, ax = pel.x - from.x, ay = pel.y - from.y, az = pel.z - from.z, along = ax * dir.x + ay * dir.y + az * dir.z;
+    if (along < -1.5 || along > wt + 1.5) continue;
+    const ox = ax - dir.x * along, oy = ay - dir.y * along, oz = az - dir.z * along;
+    if (ox * ox + oy * oy + oz * oz > 1.6 * 1.6) continue;                       // nowhere near this one
+    skinSegments(d, from, dir, wt, segs);
+  }
+  segs.sort((a, b) => a.t0 - b.t0);
+  let budget = (PEN[W.key] || 0.5) * (0.85 + Math.random() * 0.3);
+  for (const g of segs) {
+    if (g.t0 > wt) break;
+    const d = g.d, part = d.parts[g.p0], pt = from.clone().addScaledVector(dir, g.t0), nrm = g.n0.clone();
+    const len = g.t1 !== null ? g.t1 - g.t0 : Infinity, through = len <= budget;
+    const exitPt = through ? from.clone().addScaledVector(dir, g.t1) : null, exitN = through ? g.n1.clone() : null;
+    d.addHole(part, pt, nrm);
+    if (through) d.addHole(d.parts[g.p1], exitPt, exitN, true);
+    bloodHit(part, pt, dir, nrm, W, exitPt, exitN);
+    d.hitBy(part, pt, dir, nrm, W, through ? len : budget);
+    crossEl.classList.add('hit'); crossT = 0.12;
+    if (!through) return pt;                                                    // it stops in there
+    budget -= len + 0.04;
+  }
+  if (!wb) return far;
+  const ud = wb.userData || {};
+  spawnPuff(wp.x, wp.y, wp.z, '#c9c1b2', 0.45, 0.55, 0.35);
+  if (ud.kind === 'crate') { wb.applyImpulse(toC(dir.clone().multiplyScalar(30 * (W.push || 1))), toC(wp).vsub(wb.position)); wb.wakeUp(); }
+  else if (ud.kind === 'static' && wn.lengthSq() > 0) {
+    const h = new THREE.Mesh(holeWallGeo, matHole);
+    h.position.copy(wp).addScaledVector(wn, 0.003); h.lookAt(h.position.clone().add(wn)); scene.add(h);
+    wallHoles.push(h); if (wallHoles.length > 60) scene.remove(wallHoles.shift());
+  }
+  return wp;
+}
 const holeWallGeo = new THREE.CircleGeometry(0.014, 10);
 function fire() {
   const W = WEAPONS[vm.w], mdl = models[vm.w];
@@ -5853,45 +6884,29 @@ function fire() {
   const hsp = Math.hypot(player.vel.x, player.vel.z);
   const spread = (W.spread + (W.adsSpread - W.spread) * vm.ads) * (1 + Math.min(1.2, hsp / 4) * (1 - vm.ads * 0.6) + (player.onGround ? 0 : 1.5)) * (1 - 0.25 * player.crouch);
   const muzzleW = vmMuzzleWorld(mdl);
-  let refined = 0;
   for (let i = 0; i < (W.pellets || 1); i++) {
-    const r = aimRay(spread);
-    spawnTracer(muzzleW, r.hit ? r.point : r.to);
-    if (i === 0) hearShot(camera.position, r.hit ? r.point : r.to);
-    if (!r.hit) continue;
-    const ud = r.body.userData || {};
-    if (ud.kind === 'dummy') {
-      const d = ud.dummy, part = d.parts[ud.idx];
-      // land the hole on the actual skin where possible
-      let pt = r.point, nrm = r.normal.lengthSq() > 0 ? r.normal : r.dir.clone().negate();
-      if (refined++ < 3) {
-        rcMesh.set(r.from, r.dir); rcMesh.far = r.from.distanceTo(r.point) + 0.35;
-        for (const m of d.meshes) m.computeBoundingSphere();
-        const hit = rcMesh.intersectObjects(d.meshes, false)[0];
-        if (hit && hit.point.distanceTo(r.point) < 0.3) { pt = hit.point; nrm = r.dir.clone().negate(); }
-      }
-      d.addHole(part, pt, nrm);
-      bloodHit(part, pt, r.dir, nrm, W);
-      d.hitBy(part, pt, r.dir, nrm, W);
-      crossEl.classList.add('hit'); crossT = 0.12;
-    } else {
-      spawnPuff(r.point.x, r.point.y, r.point.z, '#c9c1b2', 0.45, 0.55, 0.35);
-      if (ud.kind === 'crate') { r.body.applyImpulse(toC(r.dir.clone().multiplyScalar(30 * (W.push || 1))), toC(r.point).vsub(r.body.position)); r.body.wakeUp(); }
-      else if (ud.kind === 'static' && r.normal.lengthSq() > 0) {
-        const h = new THREE.Mesh(holeWallGeo, matHole);
-        h.position.copy(r.point).addScaledVector(r.normal, 0.003); h.lookAt(h.position.clone().add(r.normal)); scene.add(h);
-        wallHoles.push(h); if (wallHoles.length > 60) scene.remove(wallHoles.shift());
-      }
-    }
+    const r = aimDir(spread);
+    const end = shootBullet(r.from, r.dir, W);
+    spawnTracer(muzzleW, end);
+    if (i === 0) hearShot(camera.position, end);
   }
   // feel
   vm.kick = Math.min(1, vm.kick + (W.pellet ? 1 : 0.55)); vm.kickRot = Math.min(1, vm.kickRot + (W.pellet ? 1 : 0.5));
+  if (W.rec) {                                                                      // springs: a shove, not a pose
+    const R = W.rec, ads = 1 - 0.3 * vm.ads, sgn = Math.random() < 0.75 ? 1 : -1;
+    vm.rbv += R.back * R.bw * springK(0.75) * (0.9 + Math.random() * 0.2);
+    vm.rrv += R.rise * R.rw * springK(R.rz) * ads * (0.85 + Math.random() * 0.3);
+    vm.rsv += R.side * R.rw * springK(R.rz) * sgn * (0.6 + Math.random() * 0.8);
+    vm.rlv += R.roll * R.rw * springK(R.rz) * sgn * (0.6 + Math.random() * 0.8);
+  }
+  if (W.smoke) { const m = vmMuzzleWorld(mdl), f = v3(); camera.getWorldDirection(f); m.addScaledVector(f, 0.35);
+    spawnPuff(m.x, m.y, m.z, '#c8c3ba', W.smoke * (0.8 + Math.random() * 0.4), 0.7 + W.smoke * 0.4, 0.12); }
   recoil = Math.min(0.09, recoil + W.kick * (1 - vm.ads * 0.4));
   player.yaw += (Math.random() - 0.5) * W.kick * 0.25;
   vm.flashT = W.flash || 0.035; muzzleLight.intensity = W.light || 6;                 // a muzzle flash is over in a frame or two
   if (mdl.flash) mdl.flash.scale.setScalar(W.flashSize || 0.1);
   if (W.pellet) { vm.pump = 0.001; vm.hullOut = false; }
-  if (mdl.slide) mdl.slide.position.z = mdl.slideBack || 0.028;
+  if (mdl.slide) { mdl.slide.position.z = mdl.slideBack || 0.028; mdl.slideT = 0; }
   if (mdl.port) mdl.portOpen = true;                                                       // the bolt carrier knocks the dust cover open
   if (W.brass && W.brass !== 'hull') ejectBrass(W.brass, mdl);                           // out of the port, to the right
   if (W.lockBack && ammo[vm.w] === 0) mdl.slideLock = true;                              // empty: the slide / bolt stays back
@@ -5906,7 +6921,8 @@ function vmMuzzleWorld(mdl) {
 function startReload() {
   const W = WEAPONS[vm.w];
   if (!W.mag || vm.reload || ammo[vm.w] >= W.mag || vm.raise < 1) return;
-  vm.reload = { t: 0, dur: W.reload, shells: W.pellet ? W.mag - ammo[vm.w] : 0 };
+  const mdl = models[vm.w];
+  vm.reload = { t: 0, dur: W.reload, shells: W.pellet ? W.mag - ammo[vm.w] : 0, empty: !W.pellet && !!mdl.slideLock && !!mdl.rack, rackDur: W.key === 'pistol' ? 0.6 : 0.7 };
   firing = false;
 }
 
@@ -5972,13 +6988,20 @@ function updateViewmodel(dt, mdx, mdy) {
   // weapon switching: lower, swap, raise
   if (vm.switchTo) {
     vm.raise -= dt * 5;
-    if (vm.raise <= 0) { vm.raise = 0; vm.w = vm.switchTo; vm.switchTo = 0; vm.reload = null; vm.pump = 0; }
+    if (vm.raise <= 0) { vm.raise = 0; if (models[vm.w]) models[vm.w].L.userData.free = false; vm.w = vm.switchTo; vm.switchTo = 0; vm.reload = null; vm.pump = 0; }
   } else vm.raise = Math.min(1, vm.raise + dt * 4);
   for (const k in models) models[k].group.visible = Number(k) === vm.w;
   const W = WEAPONS[vm.w], mdl = models[vm.w];
   const isGun = !!W.mag;
   vm.ads += ((aiming && isGun && !vm.reload ? 1 : 0) - vm.ads) * Math.min(1, dt * 12);
   vm.kick = Math.max(0, vm.kick - dt * 9); vm.kickRot = Math.max(0, vm.kickRot - dt * 7);
+  { const R = W.rec || { bw: 30, rw: 15, rz: 0.6 }, n = Math.max(1, Math.ceil(dt / 0.004)), h = dt / n;
+    for (let i = 0; i < n; i++) {
+      vm.rbv += (-R.bw * R.bw * vm.rb - 2 * 0.75 * R.bw * vm.rbv) * h; vm.rb += vm.rbv * h;
+      vm.rrv += (-R.rw * R.rw * vm.rr - 2 * R.rz * R.rw * vm.rrv) * h; vm.rr += vm.rrv * h;
+      vm.rsv += (-R.rw * R.rw * vm.rs - 2 * R.rz * R.rw * vm.rsv) * h; vm.rs += vm.rsv * h;
+      vm.rlv += (-R.rw * R.rw * vm.rl - 2 * R.rz * R.rw * vm.rlv) * h; vm.rl += vm.rlv * h;
+    } }
   vm.swayX += (clamp(-mdx * 0.0009, -0.03, 0.03) - vm.swayX) * Math.min(1, dt * 8);
   vm.swayY += (clamp(mdy * 0.0009, -0.03, 0.03) - vm.swayY) * Math.min(1, dt * 8);
   const t = simTimeReal, hs = Math.min(1, Math.hypot(player.vel.x, player.vel.z) / 4);
@@ -5987,8 +7010,9 @@ function updateViewmodel(dt, mdx, mdy) {
   const pos = base.add(new THREE.Vector3(
     (Math.sin(vm.bob) * 0.012 * hs + Math.sin(t * 1.1) * 0.0015 + vm.swayX) * calm,
     (Math.abs(Math.cos(vm.bob)) * -0.01 * hs + Math.sin(t * 1.6) * 0.0018 + vm.swayY) * calm - (1 - vm.raise) * 0.32,
-    vm.kick * (W.back ?? 0.035)));
-  let rx = vm.kickRot * (W.rise ?? 0.07) - (1 - vm.raise) * 0.6, ry = vm.swayX * 1.5 * calm, rz = vm.swayX * -2 * calm;
+    W.rec ? vm.rb : vm.kick * (W.back ?? 0.035)));
+  let rx = (W.rec ? vm.rr : vm.kickRot * (W.rise ?? 0.07)) - (1 - vm.raise) * 0.6, ry = vm.swayX * 1.5 * calm - vm.rs, rz = vm.swayX * -2 * calm - vm.rl;
+  if (W.rec) pos.y += vm.rr * 0.045;                                                // the flip lifts the whole gun, pivoting in the wrists
   // at the hip each gun is turned in a touch toward the crosshair and canted, the way it's actually carried; aiming squares it up
   if (mdl.hipRot) { const k = 1 - vm.ads; rx += mdl.hipRot[0] * k; ry += mdl.hipRot[1] * k; rz += mdl.hipRot[2] * k; }
   // sprinting: gun canted down and across the body; landing: arms dip with the knees
@@ -6010,7 +7034,7 @@ function updateViewmodel(dt, mdx, mdy) {
         if (ammo[vm.w] >= W.mag || firing) { vm.reload = null; mdl.L.position.copy(mdl.L.userData.home); }
       }
     } else {
-      const k = r.t / r.dur;
+      const k = Math.min(1, r.t / r.dur);
       const tilt = smooth(k / 0.18) * (1 - smooth((k - 0.82) / 0.18));
       rz -= 0.5 * tilt; rx += 0.18 * tilt; pos.y -= 0.03 * tilt;
       // mag out, hand away, new mag in
@@ -6019,12 +7043,38 @@ function updateViewmodel(dt, mdx, mdy) {
       mdl.mag.visible = !(k > 0.33 && k < 0.5);
       const handK = smooth((k - 0.15) / 0.15) * (1 - smooth((k - 0.68) / 0.15));
       mdl.L.position.copy(mdl.L.userData.home).lerp(mdl.magTarget, handK);
+      mdl.L.userData.free = handK > 0.04;                                            // (off for a fresh magazine: the hand keeps its shape)
       if (!r.sndIn && k > 0.62) { r.sndIn = true; sound('mag'); }
-      if (mdl.slideLock && k > 0.78) { mdl.slideLock = false; sound('click'); }          // slide stop down / bolt release: it slams forward
+      if (!r.empty && mdl.slideLock && k > 0.78) { mdl.slideLock = false; sound('click'); }          // slide stop down / bolt release: it slams forward
       if (!r.sndOut && k > 0.22) { r.sndOut = true; sound('mag'); }
-      if (k >= 1) { ammo[vm.w] = W.mag; vm.reload = null; mdl.mag.position.y = mdl.magY; mdl.mag.visible = true; mdl.L.position.copy(mdl.L.userData.home); }
+      if (k >= 1 && !r.magDone) { r.magDone = true; mdl.L.userData.free = false; ammo[vm.w] = W.mag; mdl.mag.position.y = mdl.magY; mdl.mag.visible = true; if (!r.empty) { vm.reload = null; mdl.L.position.copy(mdl.L.userData.home); } }
+      // empty: the support hand comes over and racks it, a hard pull to the rear and let go (filmed: the slide slingshots home)
+      if (r.empty) {
+        const RK = mdl.rack, u = (r.t - r.dur * 0.8) / r.rackDur;
+        if (u > 0) {
+          const reach = smooth(u / 0.3) * (1 - smooth((u - 0.68) / 0.32)), grip = smooth((u - 0.22) / 0.12) * (u < 0.62 ? 1 : 1 - smooth((u - 0.62) / 0.08));
+          const pull = u < 0.38 ? 0 : u < 0.6 ? smooth((u - 0.38) / 0.22) : u < 0.62 ? 1 : 0;
+          r.rack = u < 0.62;
+          const at = _pv.copy(RK.at); at.z += pull * RK.pull;
+          mdl.L.position.copy(mdl.L.userData.home).lerp(at, reach);
+          mdl.L.quaternion.identity().slerp(RK.q, reach);
+          mdl.L.userData.curl = blendCurl(blendCurl(RK.curl0, CURL.relaxed, reach), CURL.fist, grip * 0.8);   // (a loose hand on the way there and back)
+          mdl.L.userData.free = true;                                                    // (the racking hand keeps its own hook of the fingers)
+          if (mdl.slide && r.rack) mdl.slide.position.z = (mdl.slideBack || 0.03) * (1 + 0.18 * pull);          // held open: the pull takes it the last bit further back
+          if (mdl.charge) mdl.charge.position.z = r.rack ? pull * RK.pull : mdl.charge.position.z * Math.max(0, 1 - dt * 30);
+          // (filmed: the pistol comes in toward the chest, muzzle up and canted, so the hand comes over the slide below the eyes;
+          //  the rifle drops a little and cants so the hand can reach the charging handle)
+          if (mdl.charge) { rz -= 0.3 * reach; rx += 0.1 * reach; pos.y -= 0.05 * reach; pos.z += 0.03 * reach; }
+          else { rz += 0.45 * reach; rx += 0.32 * reach; ry -= 0.2 * reach; pos.y -= 0.025 * reach; pos.z += 0.05 * reach; pos.x -= 0.06 * reach; }
+          if (!r.rackSnd && pull > 0.2) { r.rackSnd = true; sound('mag'); }
+          if (!r.released && u >= 0.62) { r.released = true; mdl.slideLock = false; mdl.slideT = 0.3; sound('click'); }
+          if (u >= 1) { vm.reload = null; mdl.L.position.copy(mdl.L.userData.home); mdl.L.quaternion.identity(); mdl.L.userData.curl = RK.curl0; mdl.L.userData.free = false; if (mdl.charge) mdl.charge.position.z = 0; }
+        }
+      }
     }
   }
+  // a reload cut short (switching guns): the support hand lets go of the slide
+  if (!vm.reload && mdl.rack && (mdl.L.quaternion.w < 0.99999 || mdl.L.userData.curl !== mdl.rack.curl0)) { mdl.L.quaternion.identity(); mdl.L.userData.curl = mdl.rack.curl0; mdl.L.userData.free = false; mdl.L.position.copy(mdl.L.userData.home); if (mdl.charge) mdl.charge.position.z = 0; }
   // shotgun pump after each shot
   if (vm.pump > 0 && mdl.pump) {
     vm.pump += dt;
@@ -6035,7 +7085,13 @@ function updateViewmodel(dt, mdx, mdy) {
     if (!vm.reload) mdl.L.position.z = mdl.L.userData.home.z + off;
     if (vm.pump > 0.68) { vm.pump = 0; mdl.pump.position.copy(mdl.pumpHome); mdl.L.position.copy(mdl.L.userData.home); }
   }
-  if (mdl.slide) { if (mdl.slideLock) mdl.slide.position.z += ((mdl.slideBack || 0.028) - mdl.slide.position.z) * Math.min(1, dt * 30); else mdl.slide.position.z *= Math.max(0, 1 - dt * 22); }
+  // the action: slammed back by the shot and home again in a few hundredths of a second (held open on an empty magazine)
+  if (mdl.slide && !(vm.reload && vm.reload.rack)) {
+    const back = mdl.slideBack || 0.028;
+    if (mdl.slideLock) mdl.slide.position.z += (back - mdl.slide.position.z) * Math.min(1, dt * 30);
+    else if (mdl.slideT !== undefined && mdl.slideT < 1) { mdl.slideT += dt / (W.cycle || 0.05); const k = mdl.slideT; mdl.slide.position.z = back * (k < 0.3 ? 1 : Math.max(0, 1 - smooth((k - 0.3) / 0.7))); }
+    else mdl.slide.position.z *= Math.max(0, 1 - dt * 30);
+  }
   if (mdl.port && mdl.portOpen && mdl.portA > 0) { mdl.portA = Math.max(0, mdl.portA - dt * 45); mdl.port.rotation.z = mdl.portA; }   // springs down flat against the receiver
   // the top round shows in a loaded magazine; empty, the follower comes up to the feed lips
   if (mdl.round) { const loaded = ammo[vm.w] > 0 || (vm.reload && vm.reload.t / vm.reload.dur > 0.5); mdl.round.visible = loaded; if (mdl.follower) mdl.follower.position.y = mdl.followerY - (loaded ? 0.012 : 0); }
