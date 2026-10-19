@@ -207,6 +207,86 @@ body.is-touch .keys, body.is-touch .menu kbd { display: none; }
 @media (prefers-reduced-motion: reduce) { .cross, .stick { transition: none; } }
 </style>
 
+<!-- Start-up guard: runs before the game and needs nothing from the internet. If the last start never got going it
+     starts this one safely (no saved graphics setting, then no saved game); if loading fails or stalls it says so and
+     offers a reload instead of leaving a frozen screen. -->
+<style>
+.rescue { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: rgba(8, 9, 11, 0.6); }
+.rescue[hidden] { display: none; }
+.rescue-card { width: min(420px, 100%); max-height: 100%; overflow: auto; box-sizing: border-box; padding: 20px 20px 18px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); color: var(--ink); display: grid; gap: 10px; }
+.rescue-card h2 { margin: 0; font: 700 22px/1.1 var(--font-ui); }
+.rescue-card p { margin: 0; font: 500 13px/1.45 var(--font-ui); color: var(--muted); }
+.rescue-card code { display: block; font: 500 11px/1.4 ui-monospace, monospace; color: #e7b3a3; white-space: pre-wrap; word-break: break-word; max-height: 72px; overflow: auto; }
+.rescue-card code:empty { display: none; }
+.rescue-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.rescue-row button { font: 600 14px/1 var(--font-ui); padding: 11px 14px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+.rescue-row button.primary { background: var(--accent); border-color: var(--accent); color: #17140a; }
+</style>
+<div class="rescue" id="rescue" hidden role="alertdialog" aria-labelledby="rescueH">
+  <div class="rescue-card">
+    <h2 id="rescueH">The game didn't start</h2>
+    <p id="rescueP">Something went wrong while loading.</p>
+    <code id="rescueE"></code>
+    <div class="rescue-row">
+      <button type="button" class="primary" id="rescueSafe">Reload in safe mode</button>
+      <button type="button" id="rescueReload">Reload</button>
+      <button type="button" id="rescueWait" hidden>Keep waiting</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var K = 'ragdoll-city-boot', st = null, now = Date.now(), q = location.search;
+  try { st = JSON.parse(localStorage.getItem(K) || 'null'); } catch (e) { /* storage blocked */ }
+  // a start that never reached "running" within the last half hour means the last load froze or crashed
+  var n = st && now - st.t < 30 * 60 * 1000 ? (st.n || 1) + 1 : 1, asked = /[?&]safe\b/.test(q);
+  var G = window.__guard = { safe: asked || n >= 2, deep: asked || n >= 3, done: false, shown: false };
+  try {
+    if (G.safe) localStorage.removeItem('ragdoll-city-gfx');            // back to Balanced graphics
+    if (G.deep) localStorage.removeItem('ragdoll-city-save');           // and forget the saved game
+    localStorage.setItem(K, JSON.stringify({ n: n, t: now }));
+  } catch (e) { /* storage blocked */ }
+  if (asked && history.replaceState) history.replaceState(null, '', location.pathname + location.hash);
+  function $(id) { return document.getElementById(id); }
+  G.show = function (title, text, err, canWait) {
+    if (G.done && !canWait && title !== 'The game stopped') return;
+    G.shown = true;
+    $('rescueH').textContent = title; $('rescueP').textContent = text;
+    $('rescueE').textContent = err ? String(err && (err.message || err)).slice(0, 300) : '';
+    $('rescueWait').hidden = !canWait; $('rescue').hidden = false;
+  };
+  G.hide = function () { $('rescue').hidden = true; };
+  // the game is up and running: this start counts as good
+  G.ok = function () { G.done = true; try { localStorage.removeItem(K); } catch (e) { /* ignore */ } if (G.shown && $('rescueWait').hidden === false) G.hide(); };
+  // entering a map is checked the same way: freeze there and the next start is a safe one
+  G.arm = function () { try { localStorage.setItem(K, JSON.stringify({ n: 1, t: Date.now() })); } catch (e) { /* ignore */ } };
+  function reload(safe) { location.href = location.pathname + (safe ? '?safe' : '') + location.hash; }
+  document.addEventListener('DOMContentLoaded', function () {
+    $('rescueSafe').onclick = function () { try { localStorage.removeItem('ragdoll-city-gfx'); localStorage.removeItem('ragdoll-city-save'); } catch (e) { /* ignore */ } reload(true); };
+    $('rescueReload').onclick = function () { reload(false); };
+    $('rescueWait').onclick = function () { G.hide(); G.waitUntil = Date.now() + 60000; };
+    // no 3D graphics at all: the browser has switched them off for now (often after a graphics crash)
+    try {
+      var c = document.createElement('canvas');
+      if (!(c.getContext('webgl2') || c.getContext('webgl'))) G.show('3D graphics are switched off', 'This browser has turned off 3D graphics for now, which it can do after a graphics crash. Close the browser completely (or restart the device) and open the game again.', null, false);
+    } catch (e) { /* ignore */ }
+  });
+  // errors while loading (including a library that failed to download) show the panel instead of a frozen screen
+  window.addEventListener('error', function (e) {
+    if (G.done) return;
+    var t = e.target; if (t && t.tagName && t.tagName !== 'SCRIPT') return;     // (a font or picture that didn't load doesn't matter)
+    var src = t && t.tagName === 'SCRIPT' ? t.src : '';
+    G.show('The game didn\'t start', src ? 'Part of the game couldn\'t be downloaded. Check the connection and reload.' : 'Something went wrong while loading.', src ? src.split('/').pop() : (e.error || e.message), false);
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) { if (!G.done) G.show('The game didn\'t start', 'Something went wrong while loading.', e.reason, false); });
+  // still nothing after a while: say so (it may just be a slow connection)
+  setInterval(function () {
+    if (G.done || G.shown || (G.waitUntil && Date.now() < G.waitUntil)) return;
+    if (Date.now() - now > 45000) G.show('Still loading…', 'This is taking longer than it should. It may be a slow connection — or the last session left something stuck, which a safe reload clears.', null, true);
+  }, 3000);
+})();
+</script>
+
 <div class="stage" id="stage">
   <div class="hud">
     <div class="hurt" id="hurt"></div>
@@ -261,7 +341,7 @@ body.is-touch .keys, body.is-touch .menu kbd { display: none; }
       <div class="brand">
         <span class="eyebrow">Active-ragdoll sandbox</span>
         <h1 id="gameTitle">Ragdoll City</h1>
-        <span class="build"><span class="alpha">Alpha</span>Version 0.28 · still in development</span>
+        <span class="build"><span class="alpha">Alpha</span>Version 0.30 · still in development</span>
       </div>
       <div class="play">
         <button class="go" id="go" type="button" disabled>Loading the world…</button>
@@ -505,12 +585,10 @@ const sky = new Sky(); sky.scale.setScalar(700); sky.frustumCulled = false;
   u.sunPosition.value.copy(SUN_DIR);
 }
 // drawn once into a cube and used as the backdrop: the scattering maths runs once, not every frame
-{
-  const skyScene = new THREE.Scene(); skyScene.add(sky);
-  const crt = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType });
-  new THREE.CubeCamera(1, 1000, crt).update(renderer, skyScene);
-  scene.background = crt.texture;
-}
+const skyScene = new THREE.Scene(); skyScene.add(sky);
+const skyCRT = new THREE.WebGLCubeRenderTarget(512, { type: THREE.HalfFloatType }), skyCubeCam = new THREE.CubeCamera(1, 1000, skyCRT);
+skyCubeCam.update(renderer, skyScene);
+scene.background = skyCRT.texture;
 // the same sky without its blinding disc, over sunlit ground: rendered once into the light everything is lit by
 const envScene = new THREE.Scene();
 {
@@ -542,7 +620,7 @@ const HAZE = (() => {
   ground.rotation.x = -Math.PI / 2; ground.position.y = -2; envScene.add(ground);
 }
 const skyPmrem = new THREE.PMREMGenerator(renderer);
-const skyEnv = skyPmrem.fromScene(envScene, 0.015, 0.1, 400).texture;
+let skyEnv = skyPmrem.fromScene(envScene, 0.015, 0.1, 400).texture;
 scene.environment = skyEnv;
 scene.fog = new THREE.FogExp2(HAZE, 0.006);
 
@@ -568,6 +646,8 @@ function followSun() {
 // ---- graphics quality: High adds ambient occlusion (soft contact shade in corners and under bodies) and sharper shadows ----
 const GFX = { level: TOUCH ? 'balanced' : 'high', auto: true, slowT: 0, slowN: 0 };
 try { const q = localStorage.getItem('ragdoll-city-gfx'); if (q === 'high' || q === 'balanced') { GFX.level = q; GFX.auto = false; } } catch (e) { /* storage blocked */ }
+const GUARD = window.__guard || { safe: false, deep: false, ok() {}, arm() {}, show() {} };
+if (GUARD.safe) { GFX.level = 'balanced'; GFX.auto = false; }                // (a safe start: the light graphics setting)
 let composer = null, gtao = null;
 function buildComposer() {
   const size = renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -2100,7 +2180,7 @@ function buildMap(id) {
   scene.fog.color.copy(id === 'warehouse' ? WH_FOG : HAZE);
 }
 let initialMap = 'city';
-try { const s = JSON.parse(localStorage.getItem('ragdoll-city-save') || 'null'); if (s && (s.map === 'city' || s.map === 'heist' || s.map === 'range' || s.map === 'warehouse')) initialMap = s.map; } catch (e) { /* no save */ }
+try { const s = JSON.parse(localStorage.getItem('ragdoll-city-save') || 'null'); if (!GUARD.safe && s && (s.map === 'city' || s.map === 'heist' || s.map === 'range' || s.map === 'warehouse')) initialMap = s.map; } catch (e) { /* no save */ }
 buildMap(initialMap);
 
 // pedestrians: the nearest sidewalk corner, and where to head from one
@@ -5661,8 +5741,27 @@ const vmFlashLight = new THREE.PointLight('#ffcf7a', 0, 1.5, 2); vmScene.add(vmF
 const vmCam = new THREE.PerspectiveCamera(56, 1, 0.01, 10);
 const vmRoot = new THREE.Group(); vmScene.add(vmRoot);
 const pmrem = new THREE.PMREMGenerator(renderer);
-const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+const roomEnv = new RoomEnvironment();
+let envTex = pmrem.fromScene(roomEnv, 0.04).texture;
 vmScene.environment = envTex;
+// Phones drop the GPU context now and then (switching apps, locking the screen, running short of memory). When it comes
+// back, ordinary textures upload themselves again, but anything that was drawn on the GPU once — the sky, and the light
+// the sky and the rooms give everything — comes back blank: a black sky and black, streaky buildings. Draw them again.
+renderer.domElement.addEventListener('webglcontextrestored', () => setTimeout(redrawGenerated, 0));
+function redrawGenerated() {
+  try {
+    skyCubeCam.update(renderer, skyScene);
+    const swap = new Map();
+    const oldSky = skyEnv; skyEnv = skyPmrem.fromScene(envScene, 0.015, 0.1, 400).texture; swap.set(oldSky, skyEnv);
+    const oldRoom = envTex; envTex = pmrem.fromScene(roomEnv, 0.04).texture; swap.set(oldRoom, envTex);
+    if (WH_ENV) { const oldWh = WH_ENV; WH_ENV = null; swap.set(oldWh, warehouseEnv()); }
+    for (const sc of [scene, vmScene]) {
+      if (swap.has(sc.environment)) sc.environment = swap.get(sc.environment);
+      sc.traverse(o => { if (!o.material) return; for (const m of Array.isArray(o.material) ? o.material : [o.material]) if (m.envMap && swap.has(m.envMap)) { m.envMap = swap.get(m.envMap); m.needsUpdate = true; } });
+    }
+    if (composer) { composer.dispose && composer.dispose(); composer = null; gtao = null; if (GFX.level === 'high') try { buildComposer(); } catch (e) { composer = null; } }
+  } catch (e) { console.warn('could not redraw the sky after a context loss', e); }
+}
 matSkin.envMapIntensity = 0.7;
 matJoints.envMapIntensity = 0.8;
 
@@ -9255,8 +9354,37 @@ function fireTick(rdt) {
     if (!W.auto) { firing = false; fireCd = Math.max(fireCd, W.rate * 0.5); }
   }
 }
+// A frame that throws must not stop the game: the next frame is booked first, the error is caught, and if errors keep
+// coming the likely culprits (a held body, the police, a broken position) are reset. Only if that fails is the player told.
+let healthyN = -1, healthyT = 0, frameErrs = 0, lastFix = 0;
+function healthyAfter(frames) { healthyN = Math.min(frames, 20); healthyT = performance.now() + frames * 16; }   // (some frames, and a couple of seconds)
 function loop(now) {
-  const rdt = Math.min(0.05, (now - last) / 1000); last = now;
+  requestAnimationFrame(loop);
+  try {
+    frame(now); frameErrs = Math.max(0, frameErrs - 0.02);
+    // a position gone to not-a-number throws nothing, it just freezes the picture: put things right
+    if (!isFinite(player.pos.x + player.pos.y + player.pos.z + player.yaw + player.pitch) && now - lastFix > 500) { lastFix = now; recoverFromError(); } if (healthyN > 0) { healthyN--; if (healthyN === 0 && performance.now() >= healthyT) { healthyN = -1; GUARD.ok(); } else if (healthyN === 0) healthyN = 1; } }
+  catch (e) {
+    console.error(e); frameErrs++;
+    if (now - lastFix > 1500) { lastFix = now; recoverFromError(); }
+    if (frameErrs > 90) { frameErrs = 0; GUARD.show('The game stopped', 'Something keeps going wrong in this map. Reload to carry on; a safe reload also clears the saved game.', e, false); if (playing) openMenu(); }
+  }
+}
+function recoverFromError() {
+  const tryIt = f => { try { f(); } catch (e) { /* keep going with the rest */ } };
+  tryIt(endGrab); tryIt(clearPolice);
+  tryIt(() => { vm.reload = null; vm.punch = null; vm.throwT = 0; });
+  tryIt(() => {
+    if (![player.pos.x, player.pos.y, player.pos.z, player.vel.x, player.vel.y, player.vel.z, player.yaw, player.pitch].every(isFinite)) {
+      if (bike && bike.rider) bike.dismount(false);
+      player.pos.set(START.x, groundY(START.x, START.z), START.z); player.vel.set(0, 0, 0); player.yaw = START.yaw; player.pitch = 0;
+    }
+  });
+  tryIt(() => { for (let i = dummies.length - 1; i >= 0; i--) { const d = dummies[i]; if (!d.parts.every(p => isFinite(p.body.position.x) && isFinite(p.body.position.y))) { tryIt(() => d.dispose()); dummies.splice(i, 1); } } });
+  tryIt(() => { if (bike && !bike.rider && !isFinite(bike.pos.x + bike.pos.z)) bike.park(START.bx, START.bz, START.byaw); });
+}
+function frame(now) {
+  const rdt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
   const dt = rdt * (slow ? 0.3 : 1);
   movePlayer(playing ? rdt : 0);
   fireTick(rdt);
@@ -9279,7 +9407,6 @@ function loop(now) {
   if (!paused) deadTick(rdt);
   if (hasGame) healthHud(paused ? 0 : rdt);
   watchFrameRate(rdt); saveTick(rdt);
-  requestAnimationFrame(loop);
 }
 // before you start: a slow drift over the map
 let titleT = 0.6;
@@ -9394,12 +9521,14 @@ function openMenu() {
 function closeMenu() { overlay.hidden = true; document.body.classList.remove('menu-open'); }
 function startMap(id) {
   if (!ready) return;
+  GUARD.arm(); healthyAfter(150);
   if (MAP.id !== id) buildMap(id);
   seedMap(); hasGame = true; writeSave(); lock();
 }
 function continueGame() {
   if (!ready) return;
   if (hasGame) { lock(); return; }
+  GUARD.arm(); healthyAfter(150);
   const sv = readSave();
   if (!sv) { startMap(MAP.id || 'city'); return; }
   if (MAP.id !== sv.map) buildMap(sv.map);
@@ -9615,6 +9744,9 @@ function loadGlb(src, globalName, meshopt) {
   return new Promise((resolve, reject) => {
     const sc = document.createElement('script');
     sc.src = src;
+    const timer = setTimeout(() => reject(new Error(src + ' took too long to download')), 120000);   // (a stalled download fails instead of hanging)
+    const done = f => (...a) => { clearTimeout(timer); f(...a); };
+    resolve = done(resolve); reject = done(reject);
     sc.onload = () => {
       try {
         const bin = atob(window[globalName]);
@@ -9643,9 +9775,11 @@ async function boot() {
     bike = new Motorbike(moto);
     seedMap();
     ready = true; updateMenu();
+    if (GUARD.safe) { const m = document.getElementById('ovmsg'); m.hidden = false; m.textContent = 'Started in safe mode after a problem last time: graphics are on Balanced' + (GUARD.deep ? ' and the saved game was cleared.' : '.'); }
+    healthyAfter(90);
   } catch (e) { failed(e); }
 }
-function failed(err) { console.error(err); goBtn.textContent = 'The world failed to load'; goSub.textContent = 'Reload the page to try again.'; }
+function failed(err) { console.error(err); goBtn.textContent = 'The world failed to load'; goSub.textContent = 'Reload the page to try again.'; GUARD.show('The game didn\'t start', 'The world failed to load.', err, false); }
 boot();
 vm.w = 1; vm.raise = 1;
 requestAnimationFrame(t => { last = t; loop(t); });
